@@ -7,7 +7,7 @@ echo.
 if %ERR% neq 0 (
   echo Build failed.
 ) else (
-  echo Build complete: dist\openmd.exe
+  echo Build complete: dist\lithemd.exe
 )
 pause
 exit /b %ERR%

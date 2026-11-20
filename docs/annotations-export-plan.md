@@ -19,13 +19,13 @@
 
 ```
 C:\...\document.pdf
-C:\...\document.pdf.openmd-ink.json
+C:\...\document.pdf.lithemd-ink.json
 ```
 
 或统一放在：
 
 ```
-%LOCALAPPDATA%\openmd\annotations\<path-hash>.json
+%LOCALAPPDATA%\lithemd\annotations\<path-hash>.json
 ```
 
 建议使用后者，避免在用户目录里散落旁注文件；同时在设置中提供“导出旁注文件”选项。

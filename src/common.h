@@ -1,4 +1,4 @@
-// Shared helpers for openmd: text, files, settings and the colour palette.
+// Shared helpers for LitheMD: text, files, settings and the colour palette.
 #pragma once
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -43,6 +43,7 @@ uint64_t FileWriteTimeUtc(const std::wstring& path);
 std::wstring ExePath();
 std::wstring ExeDir();
 std::wstring LocalAppDataDir();
+std::wstring LocalDataDir();
 std::wstring PathDir(const std::wstring& path);
 std::wstring PathName(const std::wstring& path);
 std::wstring PathExt(const std::wstring& path);

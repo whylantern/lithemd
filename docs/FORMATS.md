@@ -1,6 +1,6 @@
 # 格式实现说明
 
-openmd 的阅读器部分不依赖 .NET、Office、Adobe 或浏览器。下面记录每种格式的实现方式，以及可参考的开源方案。
+LitheMD 的阅读器部分不依赖 .NET、Office、Adobe 或浏览器。下面记录每种格式的实现方式，以及可参考的开源方案。
 
 ## Markdown
 
@@ -68,7 +68,7 @@ openmd 的阅读器部分不依赖 .NET、Office、Adobe 或浏览器。下面�
 ## PDF
 
 - 使用 [PDFium](https://pdfium.googlesource.com/pdfium/)（BSD 3-Clause）作为渲染引擎。
-- `vendor/pdfium/pdfium.dll` 以 RCDATA 资源嵌入 exe；首次打开 PDF 时解压到 `%LOCALAPPDATA%\openmd\pdfium-8152.dll`，然后用 `LoadLibrary` + `GetProcAddress` 动态加载。也支持把 `pdfium.dll` 放在 exe 同目录。
+- `vendor/pdfium/pdfium.dll` 以 RCDATA 资源嵌入 exe；首次打开 PDF 时解压到 `%LOCALAPPDATA%\lithemd\pdfium-8152.dll`，然后用 `LoadLibrary` + `GetProcAddress` 动态加载。也支持把 `pdfium.dll` 放在 exe 同目录。
 - 每页通过 `FPDFBitmap_CreateEx` 渲染为 BGRA，再包装成 BMP，复用已有的 WIC → Direct2D 图片缓存。
 - 这样不需要 Adobe Reader、Edge/WebView2、.NET，也不需要把 PDF 上传到任何地方。
 - 其他可选开源引擎：
@@ -88,4 +88,4 @@ openmd 的阅读器部分不依赖 .NET、Office、Adobe 或浏览器。下面�
 
 ## 为什么不用 WebView2 / Electron
 
-两者都会引入额外的运行时、较大的安装体积和潜在的网络/自动更新行为。openmd 的目标是离线、单文件、启动快，因此窗口、排版和交互都用原生 Win32 + Direct2D 完成。
+两者都会引入额外的运行时、较大的安装体积和潜在的网络/自动更新行为。LitheMD 的目标是离线、单文件、启动快，因此窗口、排版和交互都用原生 Win32 + Direct2D 完成。

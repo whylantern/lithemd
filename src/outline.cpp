@@ -29,12 +29,12 @@ void OutlineView::Register(HINSTANCE inst) {
     wc.hInstance = inst;
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     wc.hbrBackground = nullptr;
-    wc.lpszClassName = L"OpenMdOutline";
+    wc.lpszClassName = L"LitheMdOutline";
     RegisterClassExW(&wc);
 }
 
 bool OutlineView::Create(HWND parent, int id) {
-    hwnd_ = CreateWindowExW(0, L"OpenMdOutline", L"", WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_CLIPCHILDREN,
+    hwnd_ = CreateWindowExW(0, L"LitheMdOutline", L"", WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_CLIPCHILDREN,
                             0, 0, 100, 100, parent, (HMENU)(INT_PTR)id,
                             (HINSTANCE)GetWindowLongPtrW(parent, GWLP_HINSTANCE), this);
     return hwnd_ != nullptr;

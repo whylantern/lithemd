@@ -191,7 +191,7 @@ bool BuildLegacyDoc(Document& doc, const std::vector<uint8_t>& bytes, std::wstri
     Block banner;
     banner.kind = BlockKind::Banner;
     banner.label = L"兼容显示";
-    banner.text = L"这是旧版 Word 文档，openmd 会尽量保留正文内容；复杂版式可能无法完全还原。";
+    banner.text = L"这是旧版 Word 文档，LitheMD 会尽量保留正文内容；复杂版式可能无法完全还原。";
     doc.blocks.push_back(std::move(banner));
     AddParagraphBlocks(doc, text);
     if (doc.docParagraphs == 0) {

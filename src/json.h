@@ -1,4 +1,4 @@
-// Minimal JSON DOM and parser used by openmd. No external dependencies.
+// Minimal JSON DOM and parser used by LitheMD. No external dependencies.
 #pragma once
 #include <string>
 #include <vector>

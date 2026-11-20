@@ -201,7 +201,7 @@ bool ExportWindow::Create(HWND owner) {
         wc.lpfnWndProc = WndProc;
         wc.hInstance = GetModuleHandleW(nullptr);
         wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-        wc.lpszClassName = L"OpenMdExport";
+        wc.lpszClassName = L"LitheMdExport";
         RegisterClassExW(&wc);
         registered = true;
     }
@@ -240,7 +240,7 @@ bool ExportWindow::Create(HWND owner) {
         oy = std::max((int)work.top + 8, std::min(oy, (int)work.bottom - wh - 8));
     }
     EnableWindow(owner, FALSE);
-    hwnd_ = CreateWindowExW(0, L"OpenMdExport", TranslateUi(L"导出").c_str(), style, ox, oy, ww, wh,
+    hwnd_ = CreateWindowExW(0, L"LitheMdExport", TranslateUi(L"导出").c_str(), style, ox, oy, ww, wh,
                             owner, nullptr, GetModuleHandleW(nullptr), this);
     if (!hwnd_) {
         EnableWindow(owner, TRUE);

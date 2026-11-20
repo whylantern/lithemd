@@ -1074,6 +1074,27 @@ std::wstring LocalAppDataDir() {
     }
     return out;
 }
+
+std::wstring LocalDataDir() {
+    std::wstring base = LocalAppDataDir();
+    if (base.empty()) return L"";
+    std::wstring fresh = PathJoin(base, L"lithemd");
+    std::wstring legacy = PathJoin(base, L"openmd");
+    if (DirExists(fresh)) return fresh;
+    if (DirExists(legacy)) {
+        if (MoveFileExW(legacy.c_str(), fresh.c_str(), MOVEFILE_COPY_ALLOWED)) {
+            std::wstring oldNotes = PathJoin(fresh, L"openmd-notes");
+            std::wstring newNotes = PathJoin(fresh, L"lithemd-notes");
+            if (DirExists(oldNotes) && !DirExists(newNotes))
+                MoveFileExW(oldNotes.c_str(), newNotes.c_str(), 0);
+            return fresh;
+        }
+        if (DirExists(fresh)) return fresh;
+        return legacy;
+    }
+    EnsureDir(fresh);
+    return fresh;
+}
 std::wstring PathDir(const std::wstring& path) {
     size_t p = path.find_last_of(L"\\/");
     if (p == std::wstring::npos) return L"";
@@ -1561,7 +1582,7 @@ DocKind DetectKind(const std::wstring& path, const std::wstring& text) {
 std::wstring Settings::ResolveConfigPath() {
     std::wstring portable = PathJoin(ExeDir(), L"config.json");
     if (FileExists(portable)) return portable;
-    std::wstring dir = PathJoin(LocalAppDataDir(), L"openmd");
+    std::wstring dir = LocalDataDir();
     return PathJoin(dir, L"config.json");
 }
 
@@ -1718,7 +1739,7 @@ Settings Settings::Load() {
         }
     }
     if (!loaded) {
-        std::wstring legacy = PathJoin(PathJoin(LocalAppDataDir(), L"openmd"), L"state.ini");
+        std::wstring legacy = PathJoin(LocalDataDir(), L"state.ini");
         std::vector<uint8_t> lb;
         if (FileExists(legacy) && ReadFileBytes(legacy, lb)) {
             std::wstring enc;
@@ -1807,7 +1828,7 @@ bool Settings::Save() {
     if (path.empty()) path = ResolveConfigPath();
     EnsureDir(PathDir(path));
     if (WriteTextFile(path, out)) { configPath = path; return true; }
-    std::wstring fallback = PathJoin(PathJoin(LocalAppDataDir(), L"openmd"), L"config.json");
+    std::wstring fallback = PathJoin(LocalDataDir(), L"config.json");
     if (path != fallback && WriteTextFile(fallback, out)) { configPath = fallback; return true; }
     return false;
 }

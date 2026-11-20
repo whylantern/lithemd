@@ -1,14 +1,14 @@
-# openmd
+# LitheMD
 
 轻量、离线、单文件的 Windows 本地文档阅读器。使用 **C++20 + Win32 + Direct2D/DirectWrite** 编写，不依赖 .NET Framework、Java、Electron 或浏览器运行时。
 
-编译产物 `dist\openmd.exe` 约 9 MB（内嵌 PDFium），在 Windows 10 1903+ / Windows 11 上直接双击即可运行。
+编译产物 `dist\lithemd.exe` 约 9 MB（内嵌 PDFium），在 Windows 10 1903+ / Windows 11 上直接双击即可运行。
 
-![openmd](samples/logo.png)
+![LitheMD](samples/logo.png)
 
 ## 为什么是 C++
 
-旧版 openmd 是 WPF/.NET Framework 4.8 应用。这个版本把窗口、排版、Markdown、LaTeX、Office 和 PDF 阅读全部迁移到原生 C++：
+旧版 LitheMD 是 WPF/.NET Framework 4.8 应用。这个版本把窗口、排版、Markdown、LaTeX、Office 和 PDF 阅读全部迁移到原生 C++：
 
 - 启动不检查、不加载 .NET Framework
 - 不依赖 SDK、NuGet、Java、Node 或在线服务
@@ -44,23 +44,23 @@
 
 - **DOCX / XLSX**：直接解析 OOXML 的 ZIP + XML，不依赖 Office 或 Open XML SDK。
 - **DOC / XLS**：直接读取 OLE Compound File、Word FIB/片段表和 Excel BIFF8 记录；只提取文本或单元格值，不保留原始分页和样式。
-- **PDF**：内嵌 [PDFium](https://pdfium.googlesource.com/pdfium/)（BSD 许可）作为 RCDATA 资源，首次打开 PDF 时解压到 `%LOCALAPPDATA%\openmd\`。它不依赖 Adobe、Edge 或 .NET。
+- **PDF**：内嵌 [PDFium](https://pdfium.googlesource.com/pdfium/)（BSD 许可）作为 RCDATA 资源，首次打开 PDF 时解压到 `%LOCALAPPDATA%\lithemd\`。它不依赖 Adobe、Edge 或 .NET。
 - **Markdown / LaTeX**：自研 Markdown 块级/行内解析器和轻量 LaTeX 排版器；分式、根式、上下标、矩阵、cases、绝对值、取整括号、`\mid`、`\bmod` 等使用 DirectWrite 实际排版。
 
 ## 快速开始
 
 ```powershell
 # 打开阅读器
-.\dist\openmd.exe
+.\dist\lithemd.exe
 
 # 打开指定文件
-.\dist\openmd.exe samples\demo.md
-.\dist\openmd.exe samples\sample.docx
-.\dist\openmd.exe samples\sample.xlsx
-.\dist\openmd.exe samples\sample.pdf
+.\dist\lithemd.exe samples\demo.md
+.\dist\lithemd.exe samples\sample.docx
+.\dist\lithemd.exe samples\sample.xlsx
+.\dist\lithemd.exe samples\sample.pdf
 
 # 直接打开设置
-.\dist\openmd.exe --settings
+.\dist\lithemd.exe --settings
 ```
 
 把文件拖进窗口，或按 `Ctrl+O` 选择文件。
@@ -77,7 +77,7 @@
 - 代码块和表格单元格悬停显示复制按钮，点击写入剪贴板
 - **画笔注释**：以文档为画布，在正文、表格、源码、PDF 和图片上直接书写；支持画笔/橡皮、文字、直线、箭头、矩形、椭圆、颜色、粗细、撤销和清空
 - **选择与组合**：以一条笔迹/一个图形/一段文字为单位选择，支持移动、缩放、旋转、复制、粘贴、组合、取消组合和删除
-- **笔记保存**：每个文档一个 JSON，保存在 `config.json` 同目录的 `openmd-notes/`；打开时自动加载，`Ctrl+S` 或顶部“保存”按钮手动保存，不自动保存
+- **笔记保存**：每个文档一个 JSON，保存在 `config.json` 同目录的 `lithemd-notes/`；打开时自动加载，`Ctrl+S` 或顶部“保存”按钮手动保存，不自动保存
 - **PDF 文字荧光笔**：拖动框选文字后高亮；扫描版 PDF 自动退化为矩形荧光笔
 - Markdown 与 Notebook 标题大纲（`Ctrl+B`）
 - **最近打开**：主页内嵌滚动列表，按 8 条分批加载，最多保留 500 条历史，拖拽打开、窗口重新激活时自动重载
@@ -115,14 +115,14 @@
 | 按住中键移动 | 快速平滑滑动，距离越远速度越快 |
 
 > 设置 → 快捷键可录制并保存到 `config.json` 的 `shortcuts`。应用命令和文档导航键均可自定义；重复绑定先到先得并提示。`Ctrl+Shift+Z` 和小键盘缩放不是默认键，需要时可自行录制。  
-> 笔记文件位于 `config.json` 同目录的 `openmd-notes/<路径哈希>.json`，只保存当前文档，不写入原文件。
+> 笔记文件位于 `config.json` 同目录的 `lithemd-notes/<路径哈希>.json`，只保存当前文档，不写入原文件。
 
 ## 配置文件
 
 优先级：
 
-1. `openmd.exe` 同目录的 `config.json`（便携模式）
-2. `%LOCALAPPDATA%\openmd\config.json`
+1. `lithemd.exe` 同目录的 `config.json`（便携模式）
+2. `%LOCALAPPDATA%\lithemd\config.json`
 
 ```json
 {
@@ -148,19 +148,19 @@
 
 默认显示笔、擦、线、框、字；箭和圆收进工具条的“更多”隐藏栏。设置窗口可直接勾选调整，并支持“复制配置”把完整 JSON 写入剪贴板。
 
-旧版 `%LOCALAPPDATA%\openmd\state.ini` 会在首次启动时尝试迁移。设置窗口可以直接打开、复制路径、复制配置内容或定位配置文件。
+首次启动会把旧版 `%LOCALAPPDATA%\openmd` 中的配置、最近记录和笔记迁移到 `%LOCALAPPDATA%\lithemd`。设置窗口可以直接打开、复制路径、复制配置内容或定位配置文件。
 
 ## “打开方式”和默认应用
 
 设置窗口提供：
 
-- **加入打开方式**：写入当前用户 `HKCU\Software\Classes`、`RegisteredApplications` 和 `App Paths`，让 Windows 的“打开方式 → 更多应用”和“默认应用”识别 openmd，无需管理员权限。
+- **加入打开方式**：写入当前用户 `HKCU\Software\Classes`、`RegisteredApplications` 和 `App Paths`，让 Windows 的“打开方式 → 更多应用”和“默认应用”识别 LitheMD，无需管理员权限。
 - **格式复选列表**：勾选要注册的扩展名；顶部“全选”勾选框可一键全选或全不选，所有格式都勾选时会自动勾选。
 - **申请默认应用**：单选格式时调用系统 `SHOpenWithDialog`；多选时调用 Windows 的默认应用权限界面。Windows 8 以后不允许应用静默把自己设为默认，必须由用户在系统界面确认。
-- **取消默认关联**：移除 openmd 的注册并打开 Windows 默认应用设置；最终切换由用户确认。
+- **取消默认关联**：移除 LitheMD 的注册并打开 Windows 默认应用设置；最终切换由用户确认。
 - **Windows 默认应用**：打开 `ms-settings:defaultapps` 页面手动调整。
 
-也可以运行 `tools\install-association.ps1` 安装“用 openmd 打开”的右键菜单（只写 HKCU，可卸载）。
+也可以运行 `tools\install-association.ps1` 安装“用 LitheMD 打开”的右键菜单（只写 HKCU，可卸载）。
 
 ## 编译
 
@@ -175,7 +175,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1
 脚本优先使用 `tools\w64devkit\bin` 里的 `g++ / gcc / windres`；也可以传 `-Cxx` 指定外部编译器。输出：
 
 ```text
-dist\openmd.exe
+dist\lithemd.exe
 ```
 
 脚本会编译 `src\*.cpp`、`vendor\miniz.c`，用 `windres` 编译图标、manifest 和内嵌 PDFium。`vendor\pdfium\pdfium.dll` 和 `tools\w64devkit` 必须保留在源码树中。
@@ -185,12 +185,12 @@ dist\openmd.exe
 ## 目录结构
 
 ```text
-openmd/
+lithemd/
 ├─ build.ps1 / build.bat      C++ 编译脚本
 ├─ app.manifest               DPI / 系统兼容性清单
 ├─ README.md / introduce.md   说明
 ├─ docs/                      格式实现、编辑可行性评估、版本记录
-├─ assets/openmd.ico          程序图标
+├─ assets/lithemd.ico          程序图标
 ├─ samples/                   各格式示例
 ├─ src/                       C++ 源码
 │  ├─ main.cpp                入口
@@ -208,7 +208,7 @@ openmd/
 ├─ vendor/
 │  ├─ miniz.c / miniz.h       ZIP/DEFLATE（公共领域）
 │  └─ pdfium/                 PDFium DLL、头文件、许可证
-└─ dist/openmd.exe            编译产物
+└─ dist/lithemd.exe            编译产物
 ```
 
 ## 说明与边界

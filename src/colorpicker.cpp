@@ -121,7 +121,7 @@ bool ColorPickerWindow::Create() {
         wc.lpfnWndProc = WndProc;
         wc.hInstance = GetModuleHandleW(nullptr);
         wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-        wc.lpszClassName = L"OpenMdColorPicker";
+        wc.lpszClassName = L"LitheMdColorPicker";
         RegisterClassExW(&wc);
         registered = true;
     }
@@ -142,7 +142,7 @@ bool ColorPickerWindow::Create() {
         oy = std::max((int)work.top + 8, std::min(oy, (int)work.bottom - wh - 8));
     }
     EnableWindow(owner_, FALSE);
-    hwnd_ = CreateWindowExW(0, L"OpenMdColorPicker", TranslateUi(L"调色盘").c_str(), style, ox, oy, ww, wh,
+    hwnd_ = CreateWindowExW(0, L"LitheMdColorPicker", TranslateUi(L"调色盘").c_str(), style, ox, oy, ww, wh,
                             owner_, nullptr, GetModuleHandleW(nullptr), this);
     if (!hwnd_) {
         EnableWindow(owner_, TRUE);

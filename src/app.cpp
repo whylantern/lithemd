@@ -219,33 +219,39 @@ bool DeleteRegValue(const std::wstring& sub, const std::wstring& name) {
 }
 
 bool RegisterAssociations(const std::wstring& exe, const std::vector<std::wstring>& exts) {
-    const std::wstring progId = L"openmd.Document";
-    const std::wstring appKey = L"Software\\Classes\\Applications\\openmd.exe";
+    const std::wstring progId = L"LitheMD.Document";
+    const std::wstring appKey = L"Software\\Classes\\Applications\\lithemd.exe";
     std::wstring quoted = L"\"" + exe + L"\" \"%1\"";
     bool ok = true;
-    ok &= SetRegString(HKEY_CURRENT_USER, L"Software\\Classes\\" + progId, L"", L"openmd 文档");
-    ok &= SetRegString(HKEY_CURRENT_USER, L"Software\\Classes\\" + progId, L"FriendlyTypeName", L"openmd 文档");
+    ok &= SetRegString(HKEY_CURRENT_USER, L"Software\\Classes\\" + progId, L"", L"LitheMD 文档");
+    ok &= SetRegString(HKEY_CURRENT_USER, L"Software\\Classes\\" + progId, L"FriendlyTypeName", L"LitheMD 文档");
     ok &= SetRegString(HKEY_CURRENT_USER, L"Software\\Classes\\" + progId + L"\\DefaultIcon", L"", exe + L",0");
     ok &= SetRegString(HKEY_CURRENT_USER, L"Software\\Classes\\" + progId + L"\\shell\\open\\command", L"", quoted);
-    ok &= SetRegString(HKEY_CURRENT_USER, appKey, L"FriendlyAppName", L"openmd");
+    // Keep existing file associations working after the rename: the old
+    // ProgID now launches lithemd.exe too.
+    ok &= SetRegString(HKEY_CURRENT_USER, L"Software\\Classes\\openmd.Document", L"FriendlyTypeName", L"LitheMD 文档");
+    ok &= SetRegString(HKEY_CURRENT_USER, L"Software\\Classes\\openmd.Document\\DefaultIcon", L"", exe + L",0");
+    ok &= SetRegString(HKEY_CURRENT_USER, L"Software\\Classes\\openmd.Document\\shell\\open\\command", L"", quoted);
+    DeleteRegValue(L"Software\\RegisteredApplications", L"openmd");
+    ok &= SetRegString(HKEY_CURRENT_USER, appKey, L"FriendlyAppName", L"LitheMD");
     ok &= SetRegString(HKEY_CURRENT_USER, appKey + L"\\DefaultIcon", L"", exe + L",0");
     ok &= SetRegString(HKEY_CURRENT_USER, appKey + L"\\shell\\open\\command", L"", quoted);
-    // Registering the executable itself makes Windows list openmd under
+    // Registering the executable itself makes Windows list LitheMD under
     // "Open with" even before any file-type selection is made.
-    ok &= SetRegString(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\App Paths\\openmd.exe",
+    ok &= SetRegString(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\App Paths\\lithemd.exe",
                        L"", exe);
-    ok &= SetRegString(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\App Paths\\openmd.exe",
+    ok &= SetRegString(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\App Paths\\lithemd.exe",
                        L"Path", PathDir(exe));
-    ok &= SetRegString(HKEY_CURRENT_USER, L"Software\\openmd\\Capabilities", L"ApplicationName", L"openmd");
-    ok &= SetRegString(HKEY_CURRENT_USER, L"Software\\openmd\\Capabilities", L"ApplicationDescription",
+    ok &= SetRegString(HKEY_CURRENT_USER, L"Software\\LitheMD\\Capabilities", L"ApplicationName", L"LitheMD");
+    ok &= SetRegString(HKEY_CURRENT_USER, L"Software\\LitheMD\\Capabilities", L"ApplicationDescription",
                        L"轻量本地文档阅读器（Markdown / JSON / Office / PDF / 图片）");
-    ok &= SetRegString(HKEY_CURRENT_USER, L"Software\\RegisteredApplications", L"openmd",
-                       L"Software\\openmd\\Capabilities");
+    ok &= SetRegString(HKEY_CURRENT_USER, L"Software\\RegisteredApplications", L"LitheMD",
+                       L"Software\\LitheMD\\Capabilities");
     for (auto& ext : exts) {
         SetRegEmpty(HKEY_CURRENT_USER, L"Software\\Classes\\" + ext + L"\\OpenWithProgids", progId);
         SetRegEmpty(HKEY_CURRENT_USER, appKey + L"\\SupportedTypes", ext);
         HKEY cap = nullptr;
-        std::wstring capKey = L"Software\\openmd\\Capabilities\\FileAssociations";
+        std::wstring capKey = L"Software\\LitheMD\\Capabilities\\FileAssociations";
         if (RegCreateKeyExW(HKEY_CURRENT_USER, capKey.c_str(), 0, nullptr, 0, KEY_WRITE, nullptr, &cap, nullptr) == ERROR_SUCCESS) {
             RegSetValueExW(cap, ext.c_str(), 0, REG_SZ, (const BYTE*)progId.c_str(),
                            (DWORD)((progId.size() + 1) * sizeof(wchar_t)));
@@ -257,11 +263,16 @@ bool RegisterAssociations(const std::wstring& exe, const std::vector<std::wstrin
 }
 
 bool UnregisterAssociations(const std::vector<std::wstring>& exts) {
-    const std::wstring progId = L"openmd.Document";
-    const std::wstring appKey = L"Software\\Classes\\Applications\\openmd.exe";
+    const std::wstring progId = L"LitheMD.Document";
+    const std::wstring appKey = L"Software\\Classes\\Applications\\lithemd.exe";
+    const std::wstring oldProgId = L"openmd.Document";
+    const std::wstring oldAppKey = L"Software\\Classes\\Applications\\openmd.exe";
     for (auto& ext : exts) {
         DeleteRegValue(L"Software\\Classes\\" + ext + L"\\OpenWithProgids", progId);
+        DeleteRegValue(L"Software\\Classes\\" + ext + L"\\OpenWithProgids", oldProgId);
         DeleteRegValue(appKey + L"\\SupportedTypes", ext);
+        DeleteRegValue(oldAppKey + L"\\SupportedTypes", ext);
+        DeleteRegValue(L"Software\\LitheMD\\Capabilities\\FileAssociations", ext);
         DeleteRegValue(L"Software\\openmd\\Capabilities\\FileAssociations", ext);
     }
     SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, nullptr, nullptr);
@@ -270,14 +281,17 @@ bool UnregisterAssociations(const std::vector<std::wstring>& exts) {
 
 bool AssociationIsDefault(const std::wstring& ext) {
     std::wstring key = L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\FileExts\\" + ext + L"\\UserChoice";
+    auto matches = [](const wchar_t* value) {
+        return _wcsicmp(value, L"LitheMD.Document") == 0 || _wcsicmp(value, L"openmd.Document") == 0;
+    };
     HKEY h = nullptr;
     if (RegOpenKeyExW(HKEY_CURRENT_USER, key.c_str(), 0, KEY_READ, &h) == ERROR_SUCCESS) {
         wchar_t buf[512]{};
         DWORD type = 0, cb = sizeof(buf);
         LONG r = RegQueryValueExW(h, L"ProgId", nullptr, &type, (BYTE*)buf, &cb);
         RegCloseKey(h);
-        if (r == ERROR_SUCCESS && (type == REG_SZ || type == REG_EXPAND_SZ))
-            return _wcsicmp(buf, L"openmd.Document") == 0;
+        if (r == ERROR_SUCCESS && (type == REG_SZ || type == REG_EXPAND_SZ) && matches(buf))
+            return true;
     }
     key = L"Software\\Classes\\" + ext;
     if (RegOpenKeyExW(HKEY_CURRENT_USER, key.c_str(), 0, KEY_READ, &h) == ERROR_SUCCESS) {
@@ -285,14 +299,14 @@ bool AssociationIsDefault(const std::wstring& ext) {
         DWORD type = 0, cb = sizeof(buf);
         LONG r = RegQueryValueExW(h, nullptr, nullptr, &type, (BYTE*)buf, &cb);
         RegCloseKey(h);
-        if (r == ERROR_SUCCESS && (type == REG_SZ || type == REG_EXPAND_SZ))
-            return _wcsicmp(buf, L"openmd.Document") == 0;
+        if (r == ERROR_SUCCESS && (type == REG_SZ || type == REG_EXPAND_SZ) && matches(buf))
+            return true;
     }
     return false;
 }
 
 std::wstring AssociationProbeFile(const std::wstring& ext) {
-    std::wstring name = L"openmd-association" + ext;
+    std::wstring name = L"lithemd-association" + ext;
     std::wstring path = TempPath(name);
     if (!FileExists(path)) {
         std::string empty;
@@ -308,7 +322,7 @@ bool LaunchAssociationUI() {
                                   CLSCTX_INPROC_SERVER, IID_IApplicationAssociationRegistrationUI,
                                   reinterpret_cast<void**>(&ui));
     if (FAILED(hr) || !ui) return false;
-    hr = ui->LaunchAdvancedAssociationUI(L"openmd");
+    hr = ui->LaunchAdvancedAssociationUI(L"LitheMD");
     ui->Release();
     return SUCCEEDED(hr);
 }
@@ -334,7 +348,7 @@ public:
         wc.lpfnWndProc = WndProc;
         wc.hInstance = inst;
         wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-        wc.lpszClassName = L"OpenMdShortcuts";
+        wc.lpszClassName = L"LitheMdShortcuts";
         RegisterClassExW(&wc);
         DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN;
         UINT dpi = GetDpiForWindow(owner);
@@ -354,7 +368,7 @@ public:
             if (ox + ww > work.right - 8) ox = work.right - ww - 8;
             if (oy + wh > work.bottom - 8) oy = work.bottom - wh - 8;
         }
-        hwnd_ = CreateWindowExW(0, L"OpenMdShortcuts", TranslateUi(L"快捷键").c_str(), style, ox, oy, ww, wh,
+        hwnd_ = CreateWindowExW(0, L"LitheMdShortcuts", TranslateUi(L"快捷键").c_str(), style, ox, oy, ww, wh,
                                 owner, nullptr, inst, this);
         if (!hwnd_) return false;
         ShowWindow(hwnd_, SW_SHOWNORMAL);
@@ -661,7 +675,7 @@ public:
         wc.hInstance = inst;
         wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
         wc.hbrBackground = nullptr;
-        wc.lpszClassName = L"OpenMdSettings";
+        wc.lpszClassName = L"LitheMdSettings";
         RegisterClassExW(&wc);
         DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN | WS_VSCROLL;
         UINT dpi = GetDpiForWindow(owner);
@@ -686,7 +700,7 @@ public:
             if (ox + ww > work.right - 8) ox = work.right - ww - 8;
             if (oy + wh > work.bottom - 8) oy = work.bottom - wh - 8;
         }
-        hwnd_ = CreateWindowExW(0, L"OpenMdSettings", TranslateUi(L"设置").c_str(), style, ox, oy, ww, wh,
+        hwnd_ = CreateWindowExW(0, L"LitheMdSettings", TranslateUi(L"设置").c_str(), style, ox, oy, ww, wh,
                                 owner, nullptr, inst, this);
         if (!hwnd_) return false;
         if (SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0)) {
@@ -1014,9 +1028,9 @@ void SettingsWindow::Click(int id) {
         if (!ok) {
             notice_ = L"注册未完全成功，请检查当前用户权限。";
         } else if (sel.empty()) {
-            notice_ = L"已将 openmd 加入“打开方式”。勾选文件格式后可同时注册对应的扩展名。";
+            notice_ = L"已将 LitheMD 加入“打开方式”。勾选文件格式后可同时注册对应的扩展名。";
         } else {
-            notice_ = L"已将 openmd 加入“打开方式”，并注册了选中的 " +
+            notice_ = L"已将 LitheMD 加入“打开方式”，并注册了选中的 " +
                       std::to_wstring(sel.size()) + L" 种文件格式。";
         }
         break;
@@ -1025,7 +1039,7 @@ void SettingsWindow::Click(int id) {
         auto sel = SelectedExtensions(selectedExts_);
         if (sel.empty()) { notice_ = L"请先勾选要取消注册的文件格式。"; break; }
         UnregisterAssociations(sel);
-        notice_ = L"已取消选中格式的“打开方式”注册。若某个格式当前仍由 openmd 打开，请在系统默认应用中改选其他应用。";
+        notice_ = L"已取消选中格式的“打开方式”注册。若某个格式当前仍由 LitheMD 打开，请在系统默认应用中改选其他应用。";
         break;
     }
     case 7: {
@@ -1124,7 +1138,7 @@ void SettingsWindow::Click(int id) {
         if (MessageBoxW(hwnd_, TranslateUi(L"将删除本地配置、最近记录和配置缓存。已打开的文件不会被删除。\n\n是否继续？").c_str(),
                         TranslateUi(L"清空本地数据").c_str(), MB_YESNO | MB_ICONWARNING) != IDYES)
             return;
-        std::wstring localDir = PathJoin(LocalAppDataDir(), L"openmd");
+        std::wstring localDir = LocalDataDir();
         std::vector<std::wstring> paths = {
             PathJoin(localDir, L"config.json"),
             PathJoin(localDir, L"state.ini")
@@ -1337,13 +1351,13 @@ public:
         wc.hInstance = inst;
         wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
         wc.hbrBackground = nullptr;
-        wc.lpszClassName = L"OpenMdMain";
+        wc.lpszClassName = L"LitheMdMain";
         wc.hIcon = LoadIconW(inst, MAKEINTRESOURCEW(1));
         if (!wc.hIcon) wc.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
         wc.hIconSm = wc.hIcon;
         RegisterClassExW(&wc);
 
-        hwnd_ = CreateWindowExW(0, L"OpenMdMain", L"openmd",
+        hwnd_ = CreateWindowExW(0, L"LitheMdMain", L"LitheMD",
                                 WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, CW_USEDEFAULT, CW_USEDEFAULT,
                                 1180, 820, nullptr, nullptr, inst, this);
         if (!hwnd_) return false;
@@ -1739,7 +1753,7 @@ private:
                 if (!v->SaveNotes(&noteError)) {
                     std::wstring msg = noteError.empty() ? L"保存笔记失败" : noteError;
                     MessageBoxW(hwnd_, TranslateUi(msg).c_str(),
-                                L"openmd", MB_OK | MB_ICONWARNING);
+                                L"LitheMD", MB_OK | MB_ICONWARNING);
                 } else
                     InvalidateChrome();
             }
@@ -1854,14 +1868,14 @@ private:
         if (!view || !view->HasUnsavedNotes() || !view->CanSaveNotes()) return true;
         int result = MessageBoxW(hwnd_,
             TranslateUi(L"当前文档有未保存的笔记。\n\n是否保存后再继续？").c_str(),
-            L"openmd", MB_YESNOCANCEL | MB_ICONWARNING);
+            L"LitheMD", MB_YESNOCANCEL | MB_ICONWARNING);
         if (result == IDCANCEL) return false;
         if (result == IDNO) return true;
         std::wstring error;
         if (!view->SaveNotes(&error)) {
             std::wstring msg = error.empty() ? L"保存笔记失败" : error;
             MessageBoxW(hwnd_, TranslateUi(msg).c_str(),
-                        L"openmd", MB_OK | MB_ICONERROR);
+                        L"LitheMD", MB_OK | MB_ICONERROR);
             return false;
         }
         return true;
@@ -1873,7 +1887,7 @@ private:
         if (!dirty) return true;
         int result = MessageBoxW(hwnd_,
             TranslateUi(L"有标签页含未保存的笔记。\n\n是否保存全部笔记后退出？").c_str(),
-            L"openmd", MB_YESNOCANCEL | MB_ICONWARNING);
+            L"LitheMD", MB_YESNOCANCEL | MB_ICONWARNING);
         if (result == IDCANCEL) return false;
         if (result == IDNO) return true;
         for (auto& tab : tabs_) {
@@ -1882,7 +1896,7 @@ private:
             if (!tab.view->SaveNotes(&error)) {
                 std::wstring msg = error.empty() ? L"保存笔记失败" : error;
                 MessageBoxW(hwnd_, TranslateUi(msg).c_str(),
-                            L"openmd", MB_OK | MB_ICONERROR);
+                            L"LitheMD", MB_OK | MB_ICONERROR);
                 return false;
             }
         }
@@ -2066,7 +2080,7 @@ private:
             TranslateUi(L"图片") + L"\0*.png;*.jpg;*.jpeg;*.gif;*.bmp;*.tif;*.tiff;*.ico;*.webp\0" +
             TranslateUi(L"纯文本") + L"\0*.txt;*.log;*.yml;*.yaml;*.xml;*.ini;*.toml\0" +
             TranslateUi(L"所有文件") + L"\0*.*\0" + L'\0';
-        std::wstring dialogTitle = TranslateUi(L"打开文件 - openmd");
+        std::wstring dialogTitle = TranslateUi(L"打开文件 - LitheMD");
         ofn.lpstrFilter = filter.c_str();
         ofn.lpstrFile = file;
         ofn.nMaxFile = 32768;
@@ -2129,7 +2143,7 @@ private:
         auto view = std::make_unique<DocView>();
         view->SetSettings(&settings_);
         if (!view->Create(hwnd_, 200 + (int)tabs_.size())) {
-            MessageBoxW(hwnd_, TranslateUi(L"无法创建画布窗口。").c_str(), L"openmd", MB_OK | MB_ICONWARNING);
+            MessageBoxW(hwnd_, TranslateUi(L"无法创建画布窗口。").c_str(), L"LitheMD", MB_OK | MB_ICONWARNING);
             return;
         }
         view->ApplyTheme(settings_.theme);
@@ -2167,7 +2181,7 @@ private:
         if (!view->Create(hwnd_, 200 + (int)tabs_.size())) {
             loading_ = false;
             SetCursor(oldCursor);
-            MessageBoxW(hwnd_, TranslateUi(L"无法创建文档窗口。").c_str(), L"openmd", MB_OK | MB_ICONWARNING);
+            MessageBoxW(hwnd_, TranslateUi(L"无法创建文档窗口。").c_str(), L"LitheMD", MB_OK | MB_ICONWARNING);
             return;
         }
         view->ApplyTheme(settings_.theme);
@@ -2237,7 +2251,7 @@ private:
     }
 
     void UpdateTitle() {
-        std::wstring title = L"openmd";
+        std::wstring title = L"LitheMD";
         if (active_ >= 0 && active_ < (int)tabs_.size()) {
             std::wstring active = ActiveTitle();
             if (active == L"主页" || active.rfind(L"画布", 0) == 0)
@@ -2489,7 +2503,7 @@ private:
         c.FillRound(14, 14, 28, 28, 7, p.accent);
         c.DrawText(L"md", 14, 14, 28, 28, 12, HexColor(L"#FFFFFF"), true, false,
                    DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-        c.DrawText(L"openmd", 50, 15, 70, 24, 15, p.fg, true);
+        c.DrawText(L"LitheMD", 50, 15, 70, 24, 15, p.fg, true);
         BuildButtons(w);
 
         float rightMin = w;
@@ -2497,7 +2511,7 @@ private:
         float titleX = 252;
         float titleW = std::max(0.0f, rightMin - titleX - 14);
         if (titleW > 80) {
-            std::wstring title = L"openmd";
+            std::wstring title = L"LitheMD";
             std::wstring sub = L"轻量本地文档阅读器";
             DocView* view = ActiveView();
             Document* doc = view ? view->Doc() : nullptr;
@@ -2575,7 +2589,7 @@ int RunApp(HINSTANCE inst, std::vector<std::wstring> initialFiles, bool openSett
     SetUiLanguage(settings.uiLanguage);
     MainWindow window(std::move(settings), std::move(initialFiles), openSettings);
     if (!window.Create(inst)) {
-        MessageBoxW(nullptr, TranslateUi(L"无法创建 openmd 窗口。").c_str(), L"openmd", MB_OK | MB_ICONERROR);
+        MessageBoxW(nullptr, TranslateUi(L"无法创建 LitheMD 窗口。").c_str(), L"LitheMD", MB_OK | MB_ICONERROR);
         return 1;
     }
     return window.Run();

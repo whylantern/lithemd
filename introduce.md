@@ -1,6 +1,6 @@
-# openmd —— 原生 C++ 本地文档阅读器
+# LitheMD —— 原生 C++ 本地文档阅读器
 
-openmd 是一个面向 Windows 的单文件文档阅读器。这个版本完全使用 **C++20 / Win32 / Direct2D / DirectWrite** 重写，不再依赖 .NET Framework 4.8，也不需要 Electron、Java、浏览器或在线服务。双击 `dist\openmd.exe` 即可使用。
+LitheMD 是一个面向 Windows 的单文件文档阅读器。这个版本完全使用 **C++20 / Win32 / Direct2D / DirectWrite** 重写，不再依赖 .NET Framework 4.8，也不需要 Electron、Java、浏览器或在线服务。双击 `dist\lithemd.exe` 即可使用。
 
 它的目标保持不变：把常见的本地文档用一种干净、统一、舒服的方式读出来。
 
@@ -158,7 +158,7 @@ openmd 是一个面向 Windows 的单文件文档阅读器。这个版本完全�
 
 - 主题：浅色 / 深色
 - 滚轮速度：1 – 10 行
-- “加入打开方式”：注册应用本身，让 Windows 识别 openmd
+- “加入打开方式”：注册应用本身，让 Windows 识别 LitheMD
 - 勾选需要关联的文件格式；顶部“全选”勾选框可一键全选或全不选，全部勾选时自动选中
 - 申请默认应用 / 取消默认关联 / 打开 Windows 默认应用设置
 - 勾选画笔工具按钮显示在主工具条还是收进“更多”隐藏栏
@@ -178,21 +178,23 @@ openmd 是一个面向 Windows 的单文件文档阅读器。这个版本完全�
 
 位置优先级：
 
-1. `openmd.exe` 同目录的 `config.json`（便携模式）
-2. `%LOCALAPPDATA%\openmd\config.json`
+1. `lithemd.exe` 同目录的 `config.json`（便携模式）
+2. `%LOCALAPPDATA%\lithemd\config.json`
+
+首次从旧版升级时，`%LOCALAPPDATA%\openmd` 中的配置、最近记录和笔记会自动迁移到 `%LOCALAPPDATA%\lithemd`。
 
 ---
 
 ## 六、文件关联与默认应用
 
-Windows 8 以后不再允许应用静默设置默认打开方式。openmd 提供两种合规方式：
+Windows 8 以后不再允许应用静默设置默认打开方式。LitheMD 提供两种合规方式：
 
 1. 在设置中点击“注册到‘打开方式’”，把当前用户注册表写入 `HKCU\Software\Classes` 和 `RegisteredApplications`。
 2. 点击“选择默认应用…”，调用系统 `SHOpenWithDialog`，由用户勾选“始终使用此应用”。
 
 也可以直接打开 `ms-settings:defaultapps`，在系统设置中调整。
 
-`tools\install-association.ps1` 只安装右键菜单“用 openmd 打开”，不修改默认关联，可随时卸载。
+`tools\install-association.ps1` 只安装右键菜单“用 LitheMD 打开”，不修改默认关联，可随时卸载。
 
 ---
 
@@ -210,7 +212,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1
 
 或者直接双击 `build.bat`。脚本会优先使用 `tools\w64devkit\bin` 中的编译器；也可以用 `-Cxx` 指定外部 g++。
 
-输出 `dist\openmd.exe`。PDFium DLL 会作为 RCDATA 资源嵌入 exe，分发时仍然只需要一个文件。
+输出 `dist\lithemd.exe`。PDFium DLL 会作为 RCDATA 资源嵌入 exe，分发时仍然只需要一个文件。
 
 ---
 
@@ -226,4 +228,4 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1
 
 ---
 
-openmd 为“快速看一眼本地文档”而做：打开快、排版稳、不打扰。
+LitheMD 为“快速看一眼本地文档”而做：打开快、排版稳、不打扰。

@@ -184,7 +184,11 @@ std::wstring DocView::NotesPath() const {
     }
     wchar_t name[40];
     swprintf(name, 40, L"%016llX.json", (unsigned long long)hash);
-    return PathJoin(PathJoin(PathDir(cfg), L"openmd-notes"), name);
+    std::wstring dir = PathDir(cfg);
+    std::wstring fresh = PathJoin(dir, L"lithemd-notes");
+    std::wstring legacy = PathJoin(dir, L"openmd-notes");
+    if (DirExists(legacy) && !DirExists(fresh)) return PathJoin(legacy, name);
+    return PathJoin(fresh, name);
 }
 
 void DocView::MarkNotesDirty() {
@@ -1732,7 +1736,7 @@ void DocView::InkAction(int action) {
         if (!CanSaveNotes() || !HasUnsavedNotes()) return;
         std::wstring err;
         if (!SaveNotes(&err))
-            MessageBoxW(hwnd_, TranslateUi(err.empty() ? L"保存笔记失败" : err).c_str(), L"openmd", MB_OK | MB_ICONWARNING);
+            MessageBoxW(hwnd_, TranslateUi(err.empty() ? L"保存笔记失败" : err).c_str(), L"LitheMD", MB_OK | MB_ICONWARNING);
     } else if (action >= INK_PEN && action <= INK_TEXT) {
         if (inkEdit_) InkCommitText();
         inkTool_ = action - INK_PEN;

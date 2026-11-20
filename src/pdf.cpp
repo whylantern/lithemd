@@ -53,7 +53,7 @@ PdfiumApi g_api;
 std::once_flag g_initOnce;
 
 std::wstring EmbeddedDllPath() {
-    std::wstring dir = PathJoin(LocalAppDataDir(), L"openmd");
+    std::wstring dir = LocalDataDir();
     EnsureDir(dir);
     return PathJoin(dir, std::wstring(L"pdfium-") + kPdfiumVersion + L".dll");
 }

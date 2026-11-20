@@ -530,7 +530,7 @@ static std::unique_ptr<Document> LoadDocumentImpl(const std::wstring& pathIn, st
     GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &fad);
     uint64_t size = ((uint64_t)fad.nFileSizeHigh << 32) | fad.nFileSizeLow;
     if (size > 512ull * 1024 * 1024) {
-        error = L"文件超过 512 MB，openmd 已停止加载";
+        error = L"文件超过 512 MB，LitheMD 已停止加载";
         return nullptr;
     }
 

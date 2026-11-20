@@ -1,4 +1,4 @@
-﻿#include "view.h"
+#include "view.h"
 #include "view_internal.h"
 #include "render.h"
 #include "latex.h"
@@ -139,13 +139,13 @@ void DocView::Register(HINSTANCE inst) {
     wc.hInstance = inst;
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     wc.hbrBackground = nullptr;
-    wc.lpszClassName = L"OpenMdDocView";
+    wc.lpszClassName = L"LitheMdDocView";
     RegisterClassExW(&wc);
 }
 
 bool DocView::Create(HWND parent, int id) {
     parent_ = parent;
-    hwnd_ = CreateWindowExW(0, L"OpenMdDocView", L"", WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_HSCROLL |
+    hwnd_ = CreateWindowExW(0, L"LitheMdDocView", L"", WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_HSCROLL |
                             WS_CLIPCHILDREN | WS_TABSTOP, 0, 0, 100, 100, parent, (HMENU)(INT_PTR)id,
                             (HINSTANCE)GetWindowLongPtrW(parent, GWLP_HINSTANCE), this);
     return hwnd_ != nullptr;
@@ -867,7 +867,7 @@ void DocView::RelayoutIfNeeded() {
             TextStyleOptions o = BodyOpts(23.0f * z, w - pad * 2, true);
             o.lineHeight = 1.25f;
             o.baseline = 1.0f;
-            BuildPlainRichText(b.text.empty() ? L"openmd" : b.text, o, it.main);
+            BuildPlainRichText(b.text.empty() ? L"LitheMD" : b.text, o, it.main);
             it.label = b.label.empty() ? L"会话" : b.label;
             it.badge = b.badge;
             it.contentX = x + pad;
@@ -1343,7 +1343,7 @@ void DocView::PaintWelcome(Canvas& c) {
     c.FillRound(cx - 38, top, 76, 76, 16, c.palette().accentSoft);
     c.DrawText(L"md", cx - 38, top + 8, 76, 60, 34, c.palette().accent, true, false,
                DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-    c.DrawText(L"openmd", cx - 200, top + 92, 400, 42, 32, c.palette().fg, true, false,
+    c.DrawText(L"LitheMD", cx - 200, top + 92, 400, 42, 32, c.palette().fg, true, false,
                DWRITE_TEXT_ALIGNMENT_CENTER);
 
     float btnW = 154, btnH = 42;
