@@ -90,6 +90,7 @@ GitHub：<https://github.com/whylantern/lithemd>
 - **最近打开**：主页内嵌滚动列表，按 8 条分批加载，最多保留 500 条历史；单条删除、清空和删除黑名单
 - **阅读版式**：字号 85%–135%、正文宽度 680–1400，设置持久化
 - **文件监听**：外部保存后自动重载；有未保存笔记时先提示
+- **阅读位置记忆**：按文档记住滚动位置，下次打开同一文件时恢复
 - **ZIP**：浏览条目、预览、解压选中或全部；`ArchiveReader` 防止 Zip Slip、绝对路径和压缩炸弹
 - **分屏与演示**：同一文档双栏阅读；`F11` 进入无边框演示，`Esc` 退出
 - **富 Markdown**：脚注、GitHub Alerts、emoji、`==高亮==`、`^上标^`、`~下标~`
@@ -172,6 +173,8 @@ GitHub：<https://github.com/whylantern/lithemd>
 
 首次启动会把旧版 `%LOCALAPPDATA%\openmd` 中的配置、最近记录和笔记迁移到 `%LOCALAPPDATA%\lithemd`。设置窗口可以直接打开、复制路径、复制配置内容或定位配置文件。
 
+阅读位置保存在同目录的 `reading-positions.json`，最多保留 500 个文档；删除文档不会删除原文件，清空本地数据会同时移除该记录。
+
 ## “打开方式”和默认应用
 
 设置窗口提供：
@@ -188,11 +191,15 @@ GitHub：<https://github.com/whylantern/lithemd>
 
 仓库已经内置精简版 **w64devkit 2.11.0 / GCC 16.2.0**（`tools\w64devkit`），不需要安装 MinGW、.NET SDK、Visual Studio、CMake，也不需要联网。
 
-直接双击 `build.bat` 即可，或者：
+`build.ps1` 是唯一的实际构建脚本。`build.bat` 只是资源管理器双击包装器：它会调用 `build.ps1`，结束后暂停窗口以便查看错误。
+
+推荐：
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1
 ```
+
+也可以直接双击 `build.bat`，适合不熟悉 PowerShell 的用户。
 
 脚本优先使用 `tools\w64devkit\bin` 里的 `g++ / gcc / windres`；也可以传 `-Cxx` 指定外部编译器。输出：
 
@@ -208,9 +215,9 @@ dist\lithemd.exe
 
 ```text
 lithemd/
-├─ build.ps1 / build.bat      C++ 编译脚本
+├─ build.ps1 / build.bat      构建脚本 / 双击包装器
 ├─ app.manifest               DPI / 系统兼容性清单
-├─ README.md / introduce.md   说明
+├─ README.md / LICENSE        说明与许可证
 ├─ docs/                      全局要求、架构、编辑可行性、版本记录
 ├─ assets/lithemd.ico          程序图标
 ├─ samples/                   各格式示例
@@ -252,3 +259,9 @@ lithemd/
 - [PDFium](https://pdfium.googlesource.com/pdfium/)：BSD 3-Clause，用于 PDF 渲染。
 - [miniz](https://github.com/richgel999/miniz)：MIT / public domain，用于 OOXML ZIP。
 - 示例文件中的 Apache POI 测试文档与工作簿遵循 Apache License 2.0；`samples/02_python.ipynb` 等仅用于展示。
+
+## 许可证
+
+LitheMD 的原始源代码采用 **MIT License**，见 [LICENSE](LICENSE)。
+
+第三方组件、示例文件和内置编译器仍遵循各自的许可证，详见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。MIT 许可证不改变这些第三方条款。

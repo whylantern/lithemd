@@ -1,4 +1,5 @@
 @echo off
+rem Explorer-friendly wrapper only. The canonical build script is build.ps1.
 setlocal
 set "PATH=%~dp0tools\w64devkit\bin;%PATH%"
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0build.ps1" %*

@@ -10,6 +10,7 @@
 #include "dialogs.h"
 #include "path_util.h"
 #include "file_watch.h"
+#include "reading_positions.h"
 #include <commdlg.h>
 #include <commctrl.h>
 #include <shellapi.h>
@@ -1183,7 +1184,8 @@ void SettingsWindow::Click(int id) {
         std::wstring localDir = LocalDataDir();
         std::vector<std::wstring> paths = {
             PathJoin(localDir, L"config.json"),
-            PathJoin(localDir, L"state.ini")
+            PathJoin(localDir, L"state.ini"),
+            PathJoin(localDir, L"reading-positions.json")
         };
         if (!settings_->configPath.empty()) paths.push_back(settings_->configPath);
         for (auto& path : paths) {
@@ -1203,6 +1205,7 @@ void SettingsWindow::Click(int id) {
         settings_->canvasDark = false;
         settings_->shortcuts.clear();
         settings_->recent.clear();
+        settings_->recentBlocked.clear();
         settings_->configPath = Settings::ResolveConfigPath();
         selectedExts_.clear();
         notice_ = L"本地配置和历史记录已清空。";
@@ -1422,6 +1425,10 @@ public:
         }
         SetDarkTitle(hwnd_, settings_.dark);
         DragAcceptFiles(hwnd_, TRUE);
+        positionsPath_ = PathJoin(PathDir(settings_.configPath.empty() ? Settings::ResolveConfigPath()
+                                                                      : settings_.configPath),
+                                  L"reading-positions.json");
+        positions_ = ReadingPositions::Load(positionsPath_);
         tooltip_ = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr,
                                    WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX,
                                    CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT,
@@ -1702,6 +1709,7 @@ private:
         }
         case WM_CLOSE:
             if (!ConfirmCloseAll()) return 0;
+            RememberAllReadingPositions();
             DestroyWindow(hwnd_);
             return 0;
         case WM_DESTROY:
@@ -1985,12 +1993,30 @@ private:
         }
     }
 
+    void RememberReadingPosition(DocView* view, const std::wstring& path) {
+        if (!view || path.empty()) return;
+        double fraction = view->ScrollFraction();
+        if (fraction < 0) return;
+        positions_.Set(path, fraction);
+        positions_.Save(positionsPath_);
+    }
+
+    void RememberTabPosition(int index) {
+        if (index < 0 || index >= (int)tabs_.size()) return;
+        RememberReadingPosition(tabs_[(size_t)index].view.get(), tabs_[(size_t)index].path);
+    }
+
+    void RememberAllReadingPositions() {
+        for (auto& tab : tabs_) RememberReadingPosition(tab.view.get(), tab.path);
+    }
+
     void SwitchTab(int index) {
         if (index < -1 || index >= (int)tabs_.size()) return;
         if (index == active_) {
             if (DocView* v = ActiveView()) v->FocusView();
             return;
         }
+        RememberTabPosition(active_);
         bool reloadAfter = false;
         if (index >= 0) {
             Tab& next = tabs_[(size_t)index];
@@ -2092,6 +2118,7 @@ private:
     void CloseTab(int index) {
         if (index < 0 || index >= (int)tabs_.size()) return;
         if (!ConfirmSaveNotes(tabs_[(size_t)index].view.get())) return;
+        RememberTabPosition(index);
         int old = active_;
         DestroyWindow(tabs_[(size_t)index].view->hwnd());
         tabs_.erase(tabs_.begin() + index);
@@ -2193,6 +2220,7 @@ private:
     }
 
     void ApplySettingsToViews() {
+        if (!positionsPath_.empty() && !FileExists(positionsPath_)) positions_.Clear();
         RebuildShortcuts();
         ForEachView([this](DocView* v) {
             v->ApplyTheme(settings_.theme);
@@ -2375,8 +2403,13 @@ private:
         TextEncoding encoding = TextEncoding::Auto;
         DocLanguage language = settings_.documentLanguage;
         std::unique_ptr<Document> doc = LoadDocument(path, err, encoding, language, false);
-        if (doc) splitView_->SetDocument(std::move(doc));
-        else splitView_->SetError(err.empty() ? L"无法打开该文件" : err, path, L"");
+        if (doc) {
+            splitView_->SetDocument(std::move(doc));
+            double saved = positions_.Get(path);
+            if (saved >= 0) splitView_->RestoreScrollFraction(saved);
+        } else {
+            splitView_->SetError(err.empty() ? L"无法打开该文件" : err, path, L"");
+        }
         splitPath_ = path;
     }
 
@@ -2560,6 +2593,8 @@ private:
         tab.error = !doc;
         if (doc) {
             tab.view->SetDocument(std::move(doc));
+            double saved = positions_.Get(path);
+            if (saved >= 0) tab.view->RestoreScrollFraction(saved);
             if (addRecent) {
                 settings_.AddRecent(path);
                 if (home_) home_->SetRecent(settings_.recent);
@@ -2982,6 +3017,8 @@ private:
     OutlineView outline_;
     WorkspaceView workspace_;
     FileWatcher watcher_;
+    ReadingPositions positions_;
+    std::wstring positionsPath_;
     bool split_ = false;
     std::unique_ptr<DocView> splitView_;
     std::wstring splitPath_;

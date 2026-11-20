@@ -4,3 +4,7 @@ tmp/
 .old/
 *.log
 *.dmp
+config.json
+reading-positions.json
+lithemd-notes/
+translations/

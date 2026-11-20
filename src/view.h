@@ -81,6 +81,8 @@ public:
     void ScrollToBlock(int index);
     void ScrollToTop();
     int VisibleHeadingBlock() const;
+    double ScrollFraction() const;
+    void RestoreScrollFraction(double fraction);
     void CopySelection();
     void ScrollBy(float dx, float dy);
     void ScrollPage(int dir);
@@ -151,6 +153,7 @@ private:
     bool vertScrollShown_ = true;
     bool horzScrollShown_ = true;
     float lastWidth_ = 0;
+    float lastContentHeight_ = 0;
     float pendingScrollFrac_ = -1;
     float heightDip() const;
 

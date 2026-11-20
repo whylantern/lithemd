@@ -525,6 +525,23 @@ int DocView::VisibleHeadingBlock() const {
     return current;
 }
 
+double DocView::ScrollFraction() const {
+    if (!doc_ || lastContentHeight_ <= 0) return -1.0;
+    float viewH = heightDip();
+    float maxScroll = lastContentHeight_ - viewH;
+    if (maxScroll <= 1.0f) return 0.0;
+    return Clampf(scrollY_ / maxScroll, 0.0f, 1.0f);
+}
+
+void DocView::RestoreScrollFraction(double fraction) {
+    if (!doc_ || !std::isfinite(fraction) || fraction < 0) return;
+    pendingScrollFrac_ = Clampf((float)fraction, 0.0f, 1.0f);
+    layoutDirty_ = true;
+    source_.wrapWidth = -1.0f;
+    UpdateScrollBars();
+    InvalidateAll();
+}
+
 float DocView::heightDip() const {
     RECT rc{};
     GetClientRect(hwnd_, &rc);
@@ -1095,6 +1112,11 @@ void DocView::UpdateScrollBars() {
     }
     float maxY = std::max(0.0f, totalH - viewH);
     float maxX = std::max(0.0f, totalW - viewW);
+    lastContentHeight_ = totalH;
+    if (pendingScrollFrac_ >= 0) {
+        scrollY_ = pendingScrollFrac_ * maxY;
+        pendingScrollFrac_ = -1;
+    }
     scrollY_ = Clampf(scrollY_, 0, maxY);
     scrollX_ = Clampf(scrollX_, 0, maxX);
     SCROLLINFO si{};
