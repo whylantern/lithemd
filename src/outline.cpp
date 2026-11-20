@@ -55,9 +55,10 @@ void OutlineView::SetActive(int block) {
     if (hwnd_) InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
-void OutlineView::ApplyTheme(bool dark) {
-    dark_ = dark;
-    ApplyDarkWindowTheme(hwnd_, dark);
+void OutlineView::ApplyTheme(const std::wstring& theme) {
+    theme_ = theme.empty() ? L"blue" : theme;
+    dark_ = theme_ == L"dark";
+    ApplyDarkWindowTheme(hwnd_, dark_);
     if (hwnd_) InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
@@ -84,7 +85,7 @@ void OutlineView::UpdateScroll() {
 void OutlineView::Paint() {
     if (!hwnd_) return;
     Canvas c;
-    if (!c.Begin(hwnd_, Palette::Get(dark_))) return;
+    if (!c.Begin(hwnd_, Palette::Get(theme_))) return;
     auto& p = c.palette();
     c.FillRect(0, 0, c.widthDip(), c.heightDip(), p.bg);
     c.FillRect(0, 0, 1, c.heightDip(), p.border);

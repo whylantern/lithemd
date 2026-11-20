@@ -570,6 +570,20 @@ void Canvas::FillRect(float x, float y, float w, float h, const Color& c) {
     auto* b = Brush(c);
     if (b) target_->FillRectangle(D2D1::RectF(x, y, x + w, y + h), b);
 }
+void Canvas::FillPolygon(const D2D1_POINT_2F* points, size_t count, const Color& c) {
+    if (!target_ || !points || count < 3) return;
+    auto* b = Brush(c);
+    if (!b) return;
+    ComPtr<ID2D1PathGeometry> geometry;
+    if (FAILED(Engine::Instance().D2D()->CreatePathGeometry(&geometry))) return;
+    ComPtr<ID2D1GeometrySink> sink;
+    if (FAILED(geometry->Open(&sink))) return;
+    sink->BeginFigure(points[0], D2D1_FIGURE_BEGIN_FILLED);
+    sink->AddLines(points + 1, (UINT32)(count - 1));
+    sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+    sink->Close();
+    target_->FillGeometry(geometry.Get(), b);
+}
 void Canvas::FillRound(float x, float y, float w, float h, float r, const Color& c) {
     if (!target_ || w <= 0 || h <= 0) return;
     auto* b = Brush(c);

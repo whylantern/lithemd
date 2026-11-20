@@ -429,7 +429,7 @@ private:
 
     void Paint() {
         Canvas c;
-        if (!c.Begin(hwnd_, Palette::Get(settings_->dark))) return;
+        if (!c.Begin(hwnd_, Palette::Get(settings_->theme))) return;
         c.SetTranslateUi(true);
         auto& p = c.palette();
         float w = c.widthDip(), h = c.heightDip();
@@ -784,7 +784,7 @@ private:
 
 void SettingsWindow::Paint() {
     Canvas c;
-    if (!c.Begin(hwnd_, Palette::Get(settings_->dark))) return;
+    if (!c.Begin(hwnd_, Palette::Get(settings_->theme))) return;
     c.SetTranslateUi(true);
     auto& p = c.palette();
     float w = c.widthDip(), h = c.heightDip();
@@ -810,8 +810,10 @@ void SettingsWindow::Paint() {
     c.FillRect(24, 78, w - 48, 1, p.border);
 
     c.DrawText(L"外观", 24, 94, 120, 22, 13, p.fg, true);
-    AddBtn(1, 24, 122, 100, 36, L"浅色", !settings_->dark);
-    AddBtn(2, 132, 122, 100, 36, L"深色", settings_->dark);
+    AddBtn(40, 24, 122, 100, 36, L"蓝白", settings_->theme == L"blue");
+    AddBtn(41, 132, 122, 100, 36, L"深色", settings_->theme == L"dark");
+    AddBtn(42, 240, 122, 100, 36, L"暖纸", settings_->theme == L"warm");
+    AddBtn(43, 348, 122, 100, 36, L"护眼", settings_->theme == L"green");
 
     c.DrawText(L"滚轮速度", 260, 94, 160, 22, 13, p.fg, true);
     AddBtn(3, 260, 122, 38, 36, L"−");
@@ -870,9 +872,11 @@ void SettingsWindow::Paint() {
     c.FillRect(24, 588, w - 48, 1, p.border);
     c.DrawText(L"画笔工具按钮", 24, 598, 220, 22, 13, p.fg, true);
     const wchar_t* toolLabels[] = { L"笔", L"擦", L"线", L"箭", L"框", L"圆", L"字" };
+    const int toolOrder[] = { 0, 2, 3, 4, 5, 6 }; // select and eraser are pinned
     toolChecks_.clear();
-    for (int i = 0; i < 7; i++) {
-        float cx = 24 + i * 80.0f;
+    for (int k = 0; k < 6; k++) {
+        int i = toolOrder[k];
+        float cx = 24 + k * 80.0f;
         DRect r{ cx, 650, 74, 24 };
         toolChecks_.push_back({ L"", r, i });
         bool selected = (settings_->inkToolsVisible & (1 << i)) != 0;
@@ -998,8 +1002,10 @@ void SettingsWindow::Click(int id) {
         return;
     }
     switch (id) {
-    case 1: settings_->dark = false; break;
-    case 2: settings_->dark = true; break;
+    case 40: settings_->theme = L"blue"; break;
+    case 41: settings_->theme = L"dark"; break;
+    case 42: settings_->theme = L"warm"; break;
+    case 43: settings_->theme = L"green"; break;
     case 3: settings_->wheelStep = std::max(1, settings_->wheelStep - 1); break;
     case 4: settings_->wheelStep = std::min(10, settings_->wheelStep + 1); break;
     case 5: {
@@ -1071,10 +1077,13 @@ void SettingsWindow::Click(int id) {
         break;
     }
     case 13:
+        settings_->theme = L"blue";
         settings_->dark = false;
         settings_->wheelStep = 3;
         settings_->zoom = 1.0;
         settings_->inkToolsVisible = Settings::DefaultInkTools;
+        settings_->inkPresets = DefaultInkPresets();
+        settings_->inkToolbarPresets = { 0, 1, 2, 3, 4 };
         settings_->documentLanguage = DocLanguage::Auto;
         settings_->canvasWidth = 2048;
         settings_->canvasHeight = 2048;
@@ -1125,10 +1134,13 @@ void SettingsWindow::Click(int id) {
             if (FileExists(path)) DeleteFileW(path.c_str());
         }
         RemoveDirectoryW(localDir.c_str());
+        settings_->theme = L"blue";
         settings_->dark = false;
         settings_->zoom = 1.0;
         settings_->wheelStep = 3;
         settings_->inkToolsVisible = Settings::DefaultInkTools;
+        settings_->inkPresets = DefaultInkPresets();
+        settings_->inkToolbarPresets = { 0, 1, 2, 3, 4 };
         settings_->documentLanguage = DocLanguage::Auto;
         settings_->canvasWidth = 2048;
         settings_->canvasHeight = 2048;
@@ -1361,13 +1373,13 @@ public:
         home_->SetSettings(&settings_);
         if (!home_->Create(hwnd_, 100)) return false;
         WireView(home_.get(), true);
-        home_->ApplyTheme(settings_.dark);
+        home_->ApplyTheme(settings_.theme);
         home_->SetWheelStep(settings_.wheelStep);
         home_->SetZoom(settings_.zoom);
         home_->SetRecent(settings_.recent);
 
         outline_.Create(hwnd_, 101);
-        outline_.ApplyTheme(settings_.dark);
+        outline_.ApplyTheme(settings_.theme);
         outline_.SetCallback([this](int block) {
             if (DocView* v = ActiveView()) v->ScrollToBlock(block);
             outline_.SetActive(block);
@@ -1613,7 +1625,7 @@ private:
         ev.sourceModeChanged = [this, view] {
             if (view == ActiveView()) { UpdateOutline(); InvalidateChrome(); }
         };
-        ev.openColorPicker = [this, view] { OpenColorPicker(view); };
+        ev.openColorPicker = [this, view](int preset) { OpenColorPicker(view, preset); };
         ev.requestZoom = [this](int dir) {
             if (dir == 0) SetZoom(1.0);
             else SetZoom(settings_.zoom + (dir > 0 ? 0.1 : -0.1));
@@ -1960,12 +1972,12 @@ private:
     void ApplySettingsToViews() {
         RebuildShortcuts();
         ForEachView([this](DocView* v) {
-            v->ApplyTheme(settings_.dark);
+            v->ApplyTheme(settings_.theme);
             v->SetWheelStep(settings_.wheelStep);
             v->SetZoom(settings_.zoom);
         });
         if (home_) home_->SetRecent(settings_.recent);
-        outline_.ApplyTheme(settings_.dark);
+        outline_.ApplyTheme(settings_.theme);
         SetDarkTitle(hwnd_, settings_.dark);
     }
 
@@ -2019,10 +2031,11 @@ private:
     }
 
     void ToggleTheme() {
-        settings_.dark = !settings_.dark;
+        settings_.theme = settings_.theme == L"dark" ? L"blue" : L"dark";
+        settings_.dark = settings_.theme == L"dark";
         settings_.Save();
-        ForEachView([this](DocView* v) { v->ApplyTheme(settings_.dark); });
-        outline_.ApplyTheme(settings_.dark);
+        ForEachView([this](DocView* v) { v->ApplyTheme(settings_.theme); });
+        outline_.ApplyTheme(settings_.theme);
         SetDarkTitle(hwnd_, settings_.dark);
         if (settingsWin_) settingsWin_->ApplyTheme();
         InvalidateChrome();
@@ -2062,20 +2075,19 @@ private:
         if (GetOpenFileNameW(&ofn)) OpenFile(file, true, true);
     }
 
-    void OpenColorPicker(DocView* view) {
+    void OpenColorPicker(DocView* view, int presetIndex = -1) {
         if (!view) return;
-        int slot = view->CurrentInkColorIndex();
-        slot = slot >= 6 ? slot - 6 : 0;
-        slot = std::clamp(slot, 0, 1);
-        Color initial = view->CurrentInkColor();
-        auto* win = new ColorPickerWindow(hwnd_, &settings_, slot, initial,
-            [this](int chosenSlot, Color color) {
-                settings_.customColors[chosenSlot] = color;
-                settings_.Save();
-                ForEachView([this, chosenSlot](DocView* v) {
-                    v->SetSettings(&settings_);
-                    v->SelectInkColor(6 + chosenSlot);
-                });
+        if (presetIndex < 0) {
+            int position = view->CurrentInkColorIndex();
+            if (position >= 0 && position < (int)settings_.inkToolbarPresets.size())
+                presetIndex = settings_.inkToolbarPresets[(size_t)position];
+        }
+        if (settings_.inkPresets.empty()) settings_.inkPresets = DefaultInkPresets();
+        if (presetIndex < 0 || presetIndex >= (int)settings_.inkPresets.size()) presetIndex = 0;
+        Color initial = settings_.inkPresets[(size_t)presetIndex];
+        auto* win = new ColorPickerWindow(hwnd_, &settings_, presetIndex, initial,
+            [this] {
+                ForEachView([this](DocView* v) { v->SetSettings(&settings_); });
                 InvalidateChrome();
             });
         if (!win->Create()) delete win;
@@ -2120,7 +2132,7 @@ private:
             MessageBoxW(hwnd_, TranslateUi(L"无法创建画布窗口。").c_str(), L"openmd", MB_OK | MB_ICONWARNING);
             return;
         }
-        view->ApplyTheme(settings_.dark);
+        view->ApplyTheme(settings_.theme);
         view->SetWheelStep(settings_.wheelStep);
         view->SetZoom(settings_.zoom);
         WireView(view.get(), false);
@@ -2158,7 +2170,7 @@ private:
             MessageBoxW(hwnd_, TranslateUi(L"无法创建文档窗口。").c_str(), L"openmd", MB_OK | MB_ICONWARNING);
             return;
         }
-        view->ApplyTheme(settings_.dark);
+        view->ApplyTheme(settings_.theme);
         view->SetWheelStep(settings_.wheelStep);
         view->SetZoom(settings_.zoom);
         WireView(view.get(), false);
@@ -2468,7 +2480,7 @@ private:
 
     void PaintChrome() {
         Canvas c;
-        if (!c.Begin(hwnd_, Palette::Get(settings_.dark), false)) return;
+        if (!c.Begin(hwnd_, Palette::Get(settings_.theme), false)) return;
         c.SetTranslateUi(true);
         auto& p = c.palette();
         float w = c.widthDip(), h = c.heightDip();

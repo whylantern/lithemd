@@ -119,6 +119,7 @@ public:
     void ClearImageCache() { images_.clear(); }
 
     void FillRect(float x, float y, float w, float h, const Color& c);
+    void FillPolygon(const D2D1_POINT_2F* points, size_t count, const Color& c);
     void FillRound(float x, float y, float w, float h, float r, const Color& c);
     void StrokeRect(float x, float y, float w, float h, const Color& c, float thickness = 1.0f);
     void StrokeRound(float x, float y, float w, float h, float r, const Color& c, float thickness = 1.0f);

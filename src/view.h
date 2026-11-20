@@ -37,7 +37,7 @@ struct DocViewEvents {
     std::function<void()> outlineChanged;
     std::function<void()> sourceModeChanged;
     std::function<void(int)> requestZoom;   // +1 / -1 steps, 0 reset
-    std::function<void()> openColorPicker;
+    std::function<void(int)> openColorPicker; // -1 current color, otherwise preset index
 };
 
 struct InkPoint {
@@ -53,7 +53,7 @@ public:
 
     void SetEvents(DocViewEvents events) { events_ = std::move(events); }
     void SetSettings(Settings* settings);
-    void ApplyTheme(bool dark);
+    void ApplyTheme(const std::wstring& theme);
     void SetZoom(double zoom);
     void SetWheelStep(int step);
     void SetRecent(const std::vector<std::wstring>& recent);
@@ -89,6 +89,9 @@ public:
     float ViewHeightDip() const { return heightDip(); }
     bool ExportPng(float scale, std::vector<uint8_t>& png, std::wstring* error,
                    int* outW = nullptr, int* outH = nullptr);
+    bool ExportPngPage(float scale, float offsetY, float pageHeight,
+                       std::vector<uint8_t>& png, std::wstring* error,
+                       int* outW = nullptr, int* outH = nullptr);
     float ContentHeightDip();
     const std::wstring& NotesError() const { return notesError_; }
     bool CanSaveNotes() const { return doc_ && !doc_->path.empty(); }
@@ -120,6 +123,7 @@ private:
     std::wstring errorSource_;
 
     bool dark_ = false;
+    std::wstring theme_ = L"blue";
     bool sourceMode_ = false;
     double zoom_ = 1.0;
     int wheelStep_ = 3;
@@ -196,10 +200,17 @@ private:
         float rotation = 0.0f;
         int group = 0;
     };
+    struct TextHighlight {
+        int block = 0;
+        int start = 0;
+        int length = 0;
+        Color color = Color(1.0f, 0.82f, 0.18f, 0.34f);
+    };
     struct InkSnapshot {
         std::vector<InkStroke> strokes;
         std::vector<InkShape> shapes;
         std::vector<InkText> texts;
+        std::vector<TextHighlight> textHighlights;
     };
     struct InkLayer {
         std::vector<InkStroke> strokes;
@@ -215,6 +226,7 @@ private:
     };
     struct PdfHighlight {
         std::vector<DRect> rects; // normalized page coordinates, y down
+        Color color = Color(1.0f, 0.82f, 0.18f, 0.34f);
     };
     struct InkButton {
         DRect rect;
@@ -259,6 +271,13 @@ private:
     InkSnapshot inkDragBase_;
     DRect inkSelectionBarRect_;
     std::map<int, std::vector<PdfHighlight>> pdfHighlights_;
+    std::vector<TextHighlight> textHighlights_;
+    std::vector<TextHighlight> textHighlightPending_;
+    bool textHighlighting_ = false;
+    int textHighlightStartBlock_ = 0;
+    int textHighlightStartPos_ = 0;
+    int textHighlightEndBlock_ = 0;
+    int textHighlightEndPos_ = 0;
     std::map<int, std::vector<PdfChar>> pdfTextCache_;
     bool pdfHighlighting_ = false;
     int pdfHighlightPage_ = -1;
@@ -358,6 +377,9 @@ private:
     void MarkNotesDirty();
     std::wstring NotesPath() const;
     void InkSelectionBounds(float& x0, float& y0, float& x1, float& y1) const;
+    int InkGroupOf(const InkItemRef& ref) const;
+    std::vector<InkItemRef> InkGroupMembers(int group) const;
+    void InkNormalizeSelection();
     bool InkHitItem(float sx, float sy, InkItemRef& ref) const;
     bool InkSelectAt(float sx, float sy, bool add);
     void InkSelectLasso(bool add);
@@ -370,6 +392,10 @@ private:
     bool PdfPageRect(int index, float& x, float& y, float& w, float& h) const;
     void LoadPdfText(int page);
     void FinishPdfHighlight(float sx0, float sy0, float sx1, float sy1);
+    bool BeginTextHighlight(float sx, float sy);
+    void UpdateTextHighlight(float sx, float sy);
+    void FinishTextHighlight();
+    void PaintTextHighlights(class Canvas& c);
     void PaintPdfHighlights(class Canvas& c, int page, float x, float y, float w, float h);
     void InkClear();
     void InkScaleForZoom(float factor);
@@ -414,7 +440,7 @@ public:
     HWND hwnd() const { return hwnd_; }
     void SetItems(const std::vector<Heading>& items);
     void SetActive(int block);
-    void ApplyTheme(bool dark);
+    void ApplyTheme(const std::wstring& theme);
     void SetCallback(std::function<void(int)> cb) { callback_ = std::move(cb); }
 
 private:
@@ -428,5 +454,6 @@ private:
     int hover_ = -1;
     int scroll_ = 0;
     bool dark_ = false;
+    std::wstring theme_ = L"blue";
     std::function<void(int)> callback_;
 };

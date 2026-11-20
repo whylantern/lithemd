@@ -72,6 +72,7 @@ Color HexColor(const wchar_t* hex, float alpha = 1.0f);
 Color ParseColorText(const std::wstring& text, const Color& fallback = Color());
 std::wstring ColorToHex(const Color& color, bool withAlpha = true);
 Color MixColor(const Color& a, const Color& b, float t);
+std::vector<Color> DefaultInkPresets();
 
 struct Palette {
     bool dark = false;
@@ -81,7 +82,10 @@ struct Palette {
     Color jsonKey, jsonString, jsonNumber, jsonBool, jsonNull;
     static const Palette& Light();
     static const Palette& Dark();
+    static const Palette& Warm();
+    static const Palette& Green();
     static const Palette& Get(bool dark);
+    static const Palette& Get(const std::wstring& theme);
 };
 
 // ---------------------------------------------------------------- settings
@@ -171,6 +175,7 @@ DocLanguage ParseLanguage(const std::wstring& value);
 
 struct Settings {
     bool dark = false;
+    std::wstring theme = L"blue";
     double zoom = 1.0;
     int wheelStep = 3;
     std::vector<std::wstring> recent;
@@ -192,6 +197,10 @@ struct Settings {
         Color(0.545f, 0.361f, 0.965f, 1.0f),
         Color(0.063f, 0.725f, 0.506f, 1.0f)
     };
+    // Up to 12 saved pen colors. The five indices in inkToolbarPresets are
+    // shown on the main ink toolbar; the rest stay in the palette window.
+    std::vector<Color> inkPresets;
+    std::vector<int> inkToolbarPresets;
     std::wstring uiLanguage = L"zh-CN";
     static constexpr int MinCanvasSize = 256;
     static constexpr int MaxCanvasSize = 8192;

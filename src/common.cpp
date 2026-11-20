@@ -1252,6 +1252,13 @@ Color MixColor(const Color& a, const Color& b, float t) {
                  a.b + (b.b - a.b) * t, a.a + (b.a - a.a) * t);
 }
 
+std::vector<Color> DefaultInkPresets() {
+    return {
+        HexColor(L"#E5484D"), HexColor(L"#F5A524"), HexColor(L"#30A46C"),
+        HexColor(L"#3E63DD"), HexColor(L"#1F2328")
+    };
+}
+
 Color ParseColorText(const std::wstring& text, const Color& fallback) {
     std::wstring s = Trim(text);
     if (!s.empty() && s[0] == L'#') s.erase(s.begin());
@@ -1346,9 +1353,78 @@ static Palette MakeDark() {
     p.jsonNull = HexColor(L"#8B949E");
     return p;
 }
+static Palette MakeWarm() {
+    Palette p;
+    p.dark = false;
+    p.bg = HexColor(L"#FBF7F0");
+    p.surface = HexColor(L"#F3EDE3");
+    p.fg = HexColor(L"#2B2622");
+    p.muted = HexColor(L"#6B6258");
+    p.border = HexColor(L"#DED3C4");
+    p.codeBg = HexColor(L"#F3EDE3");
+    p.accent = HexColor(L"#A65B1E");
+    p.accentSoft = HexColor(L"#F5E3D2");
+    p.hover = HexColor(L"#F0E7DB");
+    p.tableHead = HexColor(L"#F3EDE3");
+    p.danger = HexColor(L"#B3261E");
+    p.dangerSoft = HexColor(L"#FBE9E7");
+    p.quoteBar = HexColor(L"#D8C9B8");
+    p.selection = HexColor(L"#A65B1E", 0.22f);
+    p.codeKeyword = HexColor(L"#9A3412");
+    p.codeString = HexColor(L"#5B4636");
+    p.codeNumber = HexColor(L"#8A4B08");
+    p.codeComment = HexColor(L"#8A8175");
+    p.codeType = HexColor(L"#7C4A03");
+    p.codePunct = HexColor(L"#6B6258");
+    p.jsonKey = HexColor(L"#8A4B08");
+    p.jsonString = HexColor(L"#3F5D3A");
+    p.jsonNumber = HexColor(L"#8A4B08");
+    p.jsonBool = HexColor(L"#B3261E");
+    p.jsonNull = HexColor(L"#8A8175");
+    return p;
+}
+static Palette MakeGreen() {
+    Palette p;
+    p.dark = false;
+    p.bg = HexColor(L"#F2F8F2");
+    p.surface = HexColor(L"#E4F0E4");
+    p.fg = HexColor(L"#1E2B1E");
+    p.muted = HexColor(L"#5A6B5A");
+    p.border = HexColor(L"#C3D8C3");
+    p.codeBg = HexColor(L"#E4F0E4");
+    p.accent = HexColor(L"#2D7A46");
+    p.accentSoft = HexColor(L"#CDE8D5");
+    p.hover = HexColor(L"#D7E9D7");
+    p.tableHead = HexColor(L"#E4F0E4");
+    p.danger = HexColor(L"#B3261E");
+    p.dangerSoft = HexColor(L"#F8E3E1");
+    p.quoteBar = HexColor(L"#B8D2B8");
+    p.selection = HexColor(L"#2D7A46", 0.22f);
+    p.codeKeyword = HexColor(L"#1F6F43");
+    p.codeString = HexColor(L"#3D5C3D");
+    p.codeNumber = HexColor(L"#2A6B52");
+    p.codeComment = HexColor(L"#708070");
+    p.codeType = HexColor(L"#4A6B2D");
+    p.codePunct = HexColor(L"#4F6350");
+    p.jsonKey = HexColor(L"#1F6F43");
+    p.jsonString = HexColor(L"#3D5C3D");
+    p.jsonNumber = HexColor(L"#2A6B52");
+    p.jsonBool = HexColor(L"#B3261E");
+    p.jsonNull = HexColor(L"#708070");
+    return p;
+}
 const Palette& Palette::Light() { static Palette p = MakeLight(); return p; }
 const Palette& Palette::Dark() { static Palette p = MakeDark(); return p; }
+const Palette& Palette::Warm() { static Palette p = MakeWarm(); return p; }
+const Palette& Palette::Green() { static Palette p = MakeGreen(); return p; }
 const Palette& Palette::Get(bool dark) { return dark ? Dark() : Light(); }
+const Palette& Palette::Get(const std::wstring& theme) {
+    std::wstring id = ToLower(Trim(theme));
+    if (id == L"dark") return Dark();
+    if (id == L"warm") return Warm();
+    if (id == L"green") return Green();
+    return Light();
+}
 
 // ---------------------------------------------------------------- doc kind
 std::wstring DocKindName(DocKind kind) {
@@ -1505,11 +1581,41 @@ void Settings::Clamp() {
         uiLanguage = uiLanguage.substr(1, uiLanguage.size() - 2);
     uiLanguage = Trim(uiLanguage);
     if (uiLanguage.empty()) uiLanguage = L"zh-CN";
+    theme = ToLower(Trim(theme));
+    if (theme.empty() || theme == L"light") theme = L"blue";
+    if (theme != L"blue" && theme != L"dark" && theme != L"warm" && theme != L"green")
+        theme = L"blue";
+    dark = theme == L"dark";
     for (auto& c : customColors) {
         c.r = std::clamp(c.r, 0.0f, 1.0f);
         c.g = std::clamp(c.g, 0.0f, 1.0f);
         c.b = std::clamp(c.b, 0.0f, 1.0f);
         c.a = std::clamp(c.a, 0.0f, 1.0f);
+    }
+    if (inkPresets.empty()) inkPresets = DefaultInkPresets();
+    if (inkPresets.size() > 12) inkPresets.resize(12);
+    for (auto& c : inkPresets) {
+        c.r = std::clamp(c.r, 0.0f, 1.0f);
+        c.g = std::clamp(c.g, 0.0f, 1.0f);
+        c.b = std::clamp(c.b, 0.0f, 1.0f);
+        c.a = std::clamp(c.a, 0.0f, 1.0f);
+    }
+    if (inkToolbarPresets.empty()) inkToolbarPresets.assign({ 0, 1, 2, 3, 4 });
+    if (inkToolbarPresets.size() > 5) inkToolbarPresets.resize(5);
+    std::vector<int> used;
+    for (auto& index : inkToolbarPresets) {
+        if (index < 0 || index >= (int)inkPresets.size() ||
+            std::find(used.begin(), used.end(), index) != used.end()) {
+            index = -1;
+            for (int candidate = 0; candidate < (int)inkPresets.size(); candidate++) {
+                if (std::find(used.begin(), used.end(), candidate) == used.end()) {
+                    index = candidate;
+                    break;
+                }
+            }
+        }
+        if (index < 0) index = 0;
+        used.push_back(index);
     }
     if ((int)documentLanguage < (int)DocLanguage::Auto ||
         (int)documentLanguage > (int)DocLanguage::Western) documentLanguage = DocLanguage::Auto;
@@ -1520,6 +1626,9 @@ Settings Settings::Load() {
     Settings s;
     s.configPath = ResolveConfigPath();
     bool loaded = false;
+    bool presetsLoaded = false;
+    bool hadCustomColors = false;
+    bool themeLoaded = false;
     std::wstring cfgText;
     std::vector<uint8_t> bytes;
     if (FileExists(s.configPath) && ReadFileBytes(s.configPath, bytes)) {
@@ -1530,7 +1639,15 @@ Settings Settings::Load() {
             loaded = true;
             for (auto& m : root.members) {
                 std::wstring key = ToLower(m.first);
-                if (key == L"theme") s.dark = _wcsicmp(NodeText(&m.second).c_str(), L"dark") == 0;
+                if (key == L"theme" || key == L"themeid") {
+                    std::wstring value = ToLower(Trim(NodeText(&m.second)));
+                    if (value == L"light") value = L"blue";
+                    if (value == L"dark" || value == L"blue" || value == L"warm" || value == L"green") {
+                        s.theme = value;
+                        s.dark = value == L"dark";
+                        themeLoaded = true;
+                    }
+                }
                 else if (key == L"dark") {
                     std::wstring v = ToLower(NodeText(&m.second));
                     s.dark = (v == L"true" || v == L"1");
@@ -1548,6 +1665,24 @@ Settings Settings::Load() {
                 else if (key == L"customcolor1" || key == L"customcolor2") {
                     int idx = key.back() == L'1' ? 0 : 1;
                     s.customColors[idx] = ParseColorText(NodeText(&m.second), s.customColors[idx]);
+                    hadCustomColors = true;
+                }
+                else if ((key == L"inkpresets" || key == L"inkcolors") &&
+                         m.second.kind == JKind::Array) {
+                    s.inkPresets.clear();
+                    for (auto& item : m.second.items) {
+                        if (item.kind != JKind::String) continue;
+                        Color color = ParseColorText(item.str, Color(0, 0, 0, 0));
+                        if (color.a > 0) s.inkPresets.push_back(color);
+                        if (s.inkPresets.size() >= 12) break;
+                    }
+                    presetsLoaded = true;
+                }
+                else if ((key == L"inktoolbarpresets" || key == L"inktoolbarcolors") &&
+                         m.second.kind == JKind::Array) {
+                    s.inkToolbarPresets.clear();
+                    for (auto& item : m.second.items)
+                        if (item.kind == JKind::Number) s.inkToolbarPresets.push_back((int)item.number);
                 }
                 else if (key == L"uilanguage" || key == L"interfacelanguage")
                     s.uiLanguage = NodeText(&m.second);
@@ -1598,14 +1733,22 @@ Settings Settings::Load() {
             }
         }
     }
+    if (!presetsLoaded && hadCustomColors) {
+        s.inkPresets = DefaultInkPresets();
+        s.inkPresets.push_back(s.customColors[0]);
+        s.inkPresets.push_back(s.customColors[1]);
+    }
+    if (!themeLoaded) s.theme = s.dark ? L"dark" : L"blue";
     s.Clamp();
     if (!FileExists(s.configPath)) s.Save();
     return s;
 }
 
 bool Settings::Save() {
+    dark = theme == L"dark";
     std::wstring out = L"{\n";
     out += L"  \"theme\": \""; out += dark ? L"dark" : L"light"; out += L"\",\n";
+    out += L"  \"themeId\": " + JsonEscape(theme) + L",\n";
     wchar_t z[32];
     swprintf(z, 32, L"%.2f", zoom);
     out += L"  \"zoom\": "; out += z; out += L",\n";
@@ -1616,6 +1759,18 @@ bool Settings::Save() {
     out += std::wstring(L"  \"canvasDark\": ") + (canvasDark ? L"true" : L"false") + L",\n";
     out += L"  \"customColor1\": \"" + ColorToHex(customColors[0]) + L"\",\n";
     out += L"  \"customColor2\": \"" + ColorToHex(customColors[1]) + L"\",\n";
+    out += L"  \"inkPresets\": [";
+    for (size_t i = 0; i < inkPresets.size(); i++) {
+        if (i) out += L", ";
+        out += JsonEscape(ColorToHex(inkPresets[i]));
+    }
+    out += L"],\n";
+    out += L"  \"inkToolbarPresets\": [";
+    for (size_t i = 0; i < inkToolbarPresets.size(); i++) {
+        if (i) out += L", ";
+        out += std::to_wstring(inkToolbarPresets[i]);
+    }
+    out += L"],\n";
     out += L"  \"uiLanguage\": " + JsonEscape(uiLanguage) + L",\n";
     out += L"  \"documentLanguage\": \"" + LanguageConfigName(documentLanguage) + L"\",\n";
     out += L"  \"shortcutsVersion\": 1,\n";

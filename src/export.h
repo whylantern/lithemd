@@ -47,11 +47,20 @@ private:
     bool updating_ = false;
     bool hasPreview_ = false;
     bool previewTooLarge_ = false;
+    bool formatPdf_ = false;
+    bool a4Pages_ = true;
+    int dpi_ = 150;
     UINT_PTR timer_ = 0;
     std::wstring notice_;
 
     DRect previewRect_;
     DRect presetRects_[4];
+    DRect formatPngRect_;
+    DRect formatPdfRect_;
+    DRect layoutA4Rect_;
+    DRect layoutLongRect_;
+    DRect dpi150Rect_;
+    DRect dpi300Rect_;
     DRect exportRect_;
     DRect cancelRect_;
 };

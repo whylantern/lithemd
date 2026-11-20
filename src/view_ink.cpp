@@ -260,6 +260,7 @@ bool DocView::SaveNotes(std::wstring* error) {
         JNode page = NoteArray();
         for (auto& h : entry.second) {
             JNode item = NoteObject();
+            item.members.emplace_back(L"color", NoteColor(h.color));
             JNode rects = NoteArray();
             for (auto& r : h.rects) rects.items.push_back(NoteRect(r));
             item.members.emplace_back(L"rects", rects);
@@ -268,6 +269,17 @@ bool DocView::SaveNotes(std::wstring* error) {
         highlights.members.emplace_back(std::to_wstring(entry.first), std::move(page));
     }
     root.members.emplace_back(L"pdfHighlights", std::move(highlights));
+
+    JNode textHl = NoteArray();
+    for (auto& h : textHighlights_) {
+        JNode item = NoteObject();
+        item.members.emplace_back(L"block", NoteInt(h.block));
+        item.members.emplace_back(L"start", NoteInt(h.start));
+        item.members.emplace_back(L"length", NoteInt(h.length));
+        item.members.emplace_back(L"color", NoteColor(h.color));
+        textHl.items.push_back(std::move(item));
+    }
+    root.members.emplace_back(L"textHighlights", std::move(textHl));
 
     std::wstring path = NotesPath();
     if (path.empty()) {
@@ -402,6 +414,7 @@ bool DocView::LoadNotes(std::wstring* error) {
             for (auto& hn : entry.second.items) {
                 if (hn.kind != JKind::Object) continue;
                 PdfHighlight h;
+                if (auto* color = hn.Get(L"color")) ReadColor(color, h.color);
                 if (auto* rects = hn.Get(L"rects"); rects && rects->kind == JKind::Array) {
                     for (auto& rn : rects->items) {
                         DRect r;
@@ -411,6 +424,18 @@ bool DocView::LoadNotes(std::wstring* error) {
                 if (!h.rects.empty()) list.push_back(std::move(h));
             }
             if (!list.empty()) pdfHighlights_[(int)page] = std::move(list);
+        }
+    }
+    if (auto* textHl = root.Get(L"textHighlights"); textHl && textHl->kind == JKind::Array) {
+        textHighlights_.clear();
+        for (auto& hn : textHl->items) {
+            if (hn.kind != JKind::Object) continue;
+            TextHighlight h;
+            if (auto* b = hn.Get(L"block")) ReadInt(b, h.block);
+            if (auto* s = hn.Get(L"start")) ReadInt(s, h.start);
+            if (auto* l = hn.Get(L"length")) ReadInt(l, h.length);
+            if (auto* c = hn.Get(L"color")) ReadColor(c, h.color);
+            if (h.block >= 0 && h.start >= 0 && h.length > 0) textHighlights_.push_back(h);
         }
     }
     notesDirty_ = false;
@@ -512,6 +537,8 @@ void DocView::FinishPdfHighlight(float sx0, float sy0, float sx1, float sy1) {
         if (!merged) lines.push_back({ c.top, c.bottom, c.left, c.right });
     }
     PdfHighlight h;
+    h.color = CurrentInkColor();
+    h.color.a = 0.34f;
     for (auto& line : lines) {
         float padY = std::max(0.001f, (line.bottom - line.top) * 0.12f);
         h.rects.push_back({ line.left, line.top - padY,
@@ -523,7 +550,8 @@ void DocView::FinishPdfHighlight(float sx0, float sy0, float sx1, float sy1) {
         // exactly like the pen fallback used by other non-text formats.
         InkPushUndo();
         InkStroke stroke;
-        stroke.color = HexColor(L"#FFD84D");
+        stroke.color = InkPalette().empty() ? HexColor(L"#FFD84D") : InkPalette()[(size_t)inkColor_];
+        stroke.color.a = 1.0f;
         stroke.width = std::max(12.0f, inkWidth_ * 4.0f);
         stroke.highlighter = true;
         if (pdfHighlightPath_.size() < 2)
@@ -549,8 +577,7 @@ void DocView::PaintPdfHighlights(Canvas& c, int page, float x, float y, float w,
     if (it != pdfHighlights_.end()) {
         for (auto& hl : it->second) {
             for (auto& r : hl.rects)
-                c.FillRect(x + r.x * w, y + r.y * h, r.w * w, r.h * h,
-                           Color(1.0f, 0.82f, 0.18f, 0.34f));
+                c.FillRect(x + r.x * w, y + r.y * h, r.w * w, r.h * h, hl.color);
         }
     }
     if (pdfHighlighting_ && pdfHighlightPage_ == page) {
@@ -561,7 +588,8 @@ void DocView::PaintPdfHighlights(Canvas& c, int page, float x, float y, float w,
         x0 = Clampf(x0, x, x + w); x1 = Clampf(x1, x, x + w);
         y0 = Clampf(y0, y, y + h); y1 = Clampf(y1, y, y + h);
         if (x1 > x0 && y1 > y0)
-            c.FillRect(x0, y0, x1 - x0, y1 - y0, Color(1.0f, 0.82f, 0.18f, 0.22f));
+            c.FillRect(x0, y0, x1 - x0, y1 - y0, Color(CurrentInkColor().r, CurrentInkColor().g,
+                                                        CurrentInkColor().b, 0.22f));
     }
 }
 
@@ -610,6 +638,69 @@ void DocView::InkContentToScreen(float cx, float cy, float& sx, float& sy) const
     }
     sx = cx - scrollX_;
     sy = cy - scrollY_;
+}
+
+int DocView::InkGroupOf(const InkItemRef& ref) const {
+    auto it = inkLayers_.find(InkKey());
+    if (it == inkLayers_.end()) return 0;
+    auto& layer = it->second;
+    if (ref.kind == 0 && ref.index >= 0 && ref.index < (int)layer.strokes.size())
+        return layer.strokes[(size_t)ref.index].group;
+    if (ref.kind == 1 && ref.index >= 0 && ref.index < (int)layer.shapes.size())
+        return layer.shapes[(size_t)ref.index].group;
+    if (ref.kind == 2 && ref.index >= 0 && ref.index < (int)layer.texts.size())
+        return layer.texts[(size_t)ref.index].group;
+    return 0;
+}
+
+std::vector<DocView::InkItemRef> DocView::InkGroupMembers(int group) const {
+    std::vector<InkItemRef> refs;
+    if (!group) return refs;
+    auto it = inkLayers_.find(InkKey());
+    if (it == inkLayers_.end()) return refs;
+    auto& layer = it->second;
+    for (int i = 0; i < (int)layer.strokes.size(); i++)
+        if (layer.strokes[(size_t)i].group == group) refs.push_back({ 0, i });
+    for (int i = 0; i < (int)layer.shapes.size(); i++)
+        if (layer.shapes[(size_t)i].group == group) refs.push_back({ 1, i });
+    for (int i = 0; i < (int)layer.texts.size(); i++)
+        if (layer.texts[(size_t)i].group == group) refs.push_back({ 2, i });
+    return refs;
+}
+
+void DocView::InkNormalizeSelection() {
+    auto it = inkLayers_.find(InkKey());
+    if (it == inkLayers_.end()) {
+        inkSelection_.clear();
+        return;
+    }
+    auto& layer = it->second;
+    std::set<int> groups;
+    for (auto& ref : inkSelection_) {
+        int group = InkGroupOf(ref);
+        if (group) groups.insert(group);
+    }
+    std::vector<InkItemRef> normalized;
+    auto add = [&](int kind, int index) {
+        for (auto& r : normalized)
+            if (r.kind == kind && r.index == index) return;
+        normalized.push_back({ kind, index });
+    };
+    for (auto& ref : inkSelection_)
+        if (ref.index >= 0 &&
+            ((ref.kind == 0 && ref.index < (int)layer.strokes.size()) ||
+             (ref.kind == 1 && ref.index < (int)layer.shapes.size()) ||
+             (ref.kind == 2 && ref.index < (int)layer.texts.size())))
+            add(ref.kind, ref.index);
+    for (int group : groups) {
+        for (int i = 0; i < (int)layer.strokes.size(); i++)
+            if (layer.strokes[(size_t)i].group == group) add(0, i);
+        for (int i = 0; i < (int)layer.shapes.size(); i++)
+            if (layer.shapes[(size_t)i].group == group) add(1, i);
+        for (int i = 0; i < (int)layer.texts.size(); i++)
+            if (layer.texts[(size_t)i].group == group) add(2, i);
+    }
+    inkSelection_ = std::move(normalized);
 }
 
 void DocView::InkSelectionBounds(float& x0, float& y0, float& x1, float& y1) const {
@@ -737,17 +828,9 @@ bool DocView::InkSelectAt(float sx, float sy, bool add) {
         return false;
     }
     std::vector<InkItemRef> picked;
-    int group = 0;
-    if (hit.kind == 0) group = layer.strokes[(size_t)hit.index].group;
-    else if (hit.kind == 1) group = layer.shapes[(size_t)hit.index].group;
-    else group = layer.texts[(size_t)hit.index].group;
+    int group = InkGroupOf(hit);
     if (group != 0) {
-        for (int i = 0; i < (int)layer.strokes.size(); i++)
-            if (layer.strokes[(size_t)i].group == group) picked.push_back({ 0, i });
-        for (int i = 0; i < (int)layer.shapes.size(); i++)
-            if (layer.shapes[(size_t)i].group == group) picked.push_back({ 1, i });
-        for (int i = 0; i < (int)layer.texts.size(); i++)
-            if (layer.texts[(size_t)i].group == group) picked.push_back({ 2, i });
+        picked = InkGroupMembers(group);
     } else {
         picked.push_back(hit);
     }
@@ -768,6 +851,7 @@ bool DocView::InkSelectAt(float sx, float sy, bool add) {
             inkSelection_.insert(inkSelection_.end(), picked.begin(), picked.end());
         }
     }
+    InkNormalizeSelection();
     InvalidateAll();
     return true;
 }
@@ -868,6 +952,7 @@ void DocView::InkSelectLasso(bool add) {
             if (!exists) inkSelection_.push_back(r);
         }
     }
+    InkNormalizeSelection();
     InvalidateAll();
 }
 
@@ -894,6 +979,7 @@ void DocView::InkPaintLasso(Canvas& c) {
 }
 
 void DocView::InkSelectBeginDrag(float sx, float sy, int mode) {
+    InkNormalizeSelection();
     float x0, y0, x1, y1;
     InkSelectionBounds(x0, y0, x1, y1);
     if (x1 < x0) return;
@@ -938,6 +1024,7 @@ void DocView::InkSelectEndDrag() {
 }
 
 void DocView::InkApplySelectionTransform(int mode, float dx, float dy, float scale, float angle) {
+    InkNormalizeSelection();
     auto& layer = Ink();
     layer.strokes = inkDragBase_.strokes;
     layer.shapes = inkDragBase_.shapes;
@@ -1022,6 +1109,7 @@ void DocView::InkPaintSelection(Canvas& c) {
 }
 
 void DocView::CopyInkSelection() {
+    InkNormalizeSelection();
     auto& layer = Ink();
     inkClipboard_ = InkSnapshot{};
     for (auto& ref : inkSelection_) {
@@ -1042,33 +1130,44 @@ void DocView::PasteInkSelection() {
     auto& layer = Ink();
     InkPushUndo();
     inkSelection_.clear();
-    int newGroup = 0;
+    std::map<int, int> groupMap;
+    auto remapGroup = [&](int oldGroup) {
+        if (!oldGroup) return 0;
+        auto it = groupMap.find(oldGroup);
+        if (it != groupMap.end()) return it->second;
+        int gid = layer.groupSeq++;
+        groupMap[oldGroup] = gid;
+        return gid;
+    };
     for (auto& s : inkClipboard_.strokes) {
         InkStroke copy = s;
         for (auto& p : copy.points) { p.x += 20; p.y += 20; }
-        if (copy.group) copy.group = newGroup ? newGroup : (newGroup = layer.groupSeq++);
+        copy.group = remapGroup(copy.group);
         layer.strokes.push_back(std::move(copy));
         inkSelection_.push_back({ 0, (int)layer.strokes.size() - 1 });
     }
     for (auto& s : inkClipboard_.shapes) {
         InkShape copy = s;
         copy.a.x += 20; copy.a.y += 20; copy.b.x += 20; copy.b.y += 20;
-        if (copy.group) copy.group = newGroup ? newGroup : (newGroup = layer.groupSeq++);
+        copy.group = remapGroup(copy.group);
         layer.shapes.push_back(std::move(copy));
         inkSelection_.push_back({ 1, (int)layer.shapes.size() - 1 });
     }
     for (auto& t : inkClipboard_.texts) {
         InkText copy = t;
         copy.at.x += 20; copy.at.y += 20;
-        if (copy.group) copy.group = newGroup ? newGroup : (newGroup = layer.groupSeq++);
+        copy.group = remapGroup(copy.group);
         layer.texts.push_back(std::move(copy));
         inkSelection_.push_back({ 2, (int)layer.texts.size() - 1 });
     }
+    InkNormalizeSelection();
+    MarkNotesDirty();
     InvalidateAll();
 }
 
 void DocView::DeleteInkSelection() {
     if (!inkMode_ || inkSelection_.empty()) return;
+    InkNormalizeSelection();
     auto& layer = Ink();
     InkPushUndo();
     std::vector<InkItemRef> refs = inkSelection_;
@@ -1089,15 +1188,34 @@ void DocView::DeleteInkSelection() {
 }
 
 void DocView::GroupInkSelection(bool group) {
-    if (!inkMode_ || inkSelection_.empty()) return;
+    if (!inkMode_) return;
+    InkNormalizeSelection();
+    if (inkSelection_.empty()) return;
     auto& layer = Ink();
+    if (group && inkSelection_.size() < 2) return;
     InkPushUndo();
-    int gid = group ? layer.groupSeq++ : 0;
-    for (auto& ref : inkSelection_) {
-        if (ref.kind == 0 && ref.index < (int)layer.strokes.size()) layer.strokes[(size_t)ref.index].group = gid;
-        else if (ref.kind == 1 && ref.index < (int)layer.shapes.size()) layer.shapes[(size_t)ref.index].group = gid;
-        else if (ref.kind == 2 && ref.index < (int)layer.texts.size()) layer.texts[(size_t)ref.index].group = gid;
+    if (group) {
+        int gid = layer.groupSeq++;
+        for (auto& ref : inkSelection_) {
+            if (ref.kind == 0 && ref.index < (int)layer.strokes.size()) layer.strokes[(size_t)ref.index].group = gid;
+            else if (ref.kind == 1 && ref.index < (int)layer.shapes.size()) layer.shapes[(size_t)ref.index].group = gid;
+            else if (ref.kind == 2 && ref.index < (int)layer.texts.size()) layer.texts[(size_t)ref.index].group = gid;
+        }
+    } else {
+        std::set<int> groups;
+        for (auto& ref : inkSelection_) {
+            int g = InkGroupOf(ref);
+            if (g) groups.insert(g);
+        }
+        for (int i = 0; i < (int)layer.strokes.size(); i++)
+            if (groups.count(layer.strokes[(size_t)i].group)) layer.strokes[(size_t)i].group = 0;
+        for (int i = 0; i < (int)layer.shapes.size(); i++)
+            if (groups.count(layer.shapes[(size_t)i].group)) layer.shapes[(size_t)i].group = 0;
+        for (int i = 0; i < (int)layer.texts.size(); i++)
+            if (groups.count(layer.texts[(size_t)i].group)) layer.texts[(size_t)i].group = 0;
     }
+    InkNormalizeSelection();
+    MarkNotesDirty();
     InvalidateAll();
 }
 
@@ -1118,6 +1236,7 @@ void DocView::InkPushUndo() {
     snap.strokes = layer.strokes;
     snap.shapes = layer.shapes;
     snap.texts = layer.texts;
+    snap.textHighlights = textHighlights_;
     layer.undo.push_back(std::move(snap));
     if (layer.undo.size() > 60) layer.undo.erase(layer.undo.begin());
     layer.redo.clear();
@@ -1131,6 +1250,7 @@ void DocView::InkUndo() {
     current.strokes = layer.strokes;
     current.shapes = layer.shapes;
     current.texts = layer.texts;
+    current.textHighlights = textHighlights_;
     layer.redo.push_back(std::move(current));
     if (layer.redo.size() > 60) layer.redo.erase(layer.redo.begin());
     InkSnapshot snap = std::move(layer.undo.back());
@@ -1138,6 +1258,7 @@ void DocView::InkUndo() {
     layer.strokes = std::move(snap.strokes);
     layer.shapes = std::move(snap.shapes);
     layer.texts = std::move(snap.texts);
+    textHighlights_ = std::move(snap.textHighlights);
     inkSelection_.clear();
     MarkNotesDirty();
     InvalidateAll();
@@ -1157,6 +1278,7 @@ void DocView::InkRedo() {
     layer.strokes = std::move(snap.strokes);
     layer.shapes = std::move(snap.shapes);
     layer.texts = std::move(snap.texts);
+    textHighlights_ = std::move(snap.textHighlights);
     inkSelection_.clear();
     MarkNotesDirty();
     InvalidateAll();
@@ -1170,6 +1292,7 @@ void DocView::InkClear() {
     layer.strokes.clear();
     layer.shapes.clear();
     layer.texts.clear();
+    textHighlights_.clear();
     inkSelection_.clear();
     inkCurrent_.points.clear();
     inkCurrentShape_ = InkShape{};
@@ -1333,15 +1456,18 @@ void DocView::PaintInkToolbar(Canvas& c) {
     int mask = (settings_ ? settings_->inkToolsVisible : Settings::DefaultInkTools) & 0x7F;
     int visibleCount = 0, hiddenCount = 0;
     for (int i = 0; i < 7; i++) {
+        if (i == 1) continue; // eraser is pinned and never hideable
         if (mask & (1 << i)) visibleCount++;
         else hiddenCount++;
     }
     if (hiddenCount == 0) inkMoreOpen_ = false;
-    float toolArea = visibleCount * 28.0f;
+    float toolArea = 0.0f;
+    toolArea += 28.0f + gap; // select
+    toolArea += 28.0f + gap; // eraser
+    toolArea += 28.0f + gap; // highlighter
+    toolArea += visibleCount * 28.0f;
     if (visibleCount > 1) toolArea += (visibleCount - 1) * 3.0f;
     if (hiddenCount > 0) toolArea += (visibleCount > 0 ? 3.0f : 0.0f) + 28.0f;
-    toolArea += 28.0f + gap; // selection tool
-    toolArea += 28.0f + gap; // highlighter (PDF text-aware, marker elsewhere)
     float colorArea = 0.0f;
     int colorCount = (int)InkPalette().size();
     for (int i = 0; i < colorCount; i++) colorArea += 22.0f;
@@ -1382,13 +1508,34 @@ void DocView::PaintInkToolbar(Canvas& c) {
         x += w + gap;
     };
 
-    button(INK_SELECT, 28, L"选", inkTool_ == INK_TOOL_SELECT, true);
+    button(INK_SELECT, 28, L"", inkTool_ == INK_TOOL_SELECT, true);
+    {
+        DRect r = inkButtons_.back().rect;
+        Color fg = inkTool_ == INK_TOOL_SELECT ? p.accent : p.fg;
+        D2D1_POINT_2F pts[] = {
+            { r.x + 7, r.y + 6 }, { r.x + 7, r.y + 24 }, { r.x + 12, r.y + 19 },
+            { r.x + 16, r.y + 27 }, { r.x + 19, r.y + 25 }, { r.x + 15, r.y + 17 },
+            { r.x + 22, r.y + 17 }
+        };
+        c.FillPolygon(pts, 7, fg);
+    }
+    button(INK_ERASER, 28, L"", inkTool_ == INK_TOOL_ERASER, true);
+    {
+        DRect r = inkButtons_.back().rect;
+        Color body = inkTool_ == INK_TOOL_ERASER ? p.accent : p.fg;
+        D2D1_POINT_2F pts[] = {
+            { r.x + 8, r.y + 21 }, { r.x + 15, r.y + 7 },
+            { r.x + 26, r.y + 14 }, { r.x + 19, r.y + 28 }
+        };
+        c.FillPolygon(pts, 4, body);
+        c.DrawLine(r.x + 14, r.y + 24, r.x + 22, r.y + 28, p.surface, 2.0f);
+    }
     button(INK_HIGHLIGHT, 28, L"荧", inkTool_ == INK_TOOL_HIGHLIGHT, true);
 
     DRect moreButton{};
     bool firstTool = true;
     for (int i = 0; i < 7; i++) {
-        if (!(mask & (1 << i))) continue;
+        if (i == 1 || !(mask & (1 << i))) continue;
         if (!firstTool) x += 3;
         firstTool = false;
         int action = INK_PEN + i;
@@ -1470,7 +1617,7 @@ void DocView::PaintInkToolbar(Canvas& c) {
 
     inkSelectionBarRect_ = DRect{};
     if (inkTool_ == INK_TOOL_SELECT && (!inkSelection_.empty() || inkClipboardValid_)) {
-        float bw = 7 * 48.0f + 16.0f, bh = 34.0f;
+        float bw = 6 * 48.0f + 16.0f, bh = 34.0f;
         float bx = std::max(8.0f, (c.widthDip() - bw) / 2);
         float by = barY + barH + 6;
         inkSelectionBarRect_ = { bx, by, bw, bh };
@@ -1478,16 +1625,17 @@ void DocView::PaintInkToolbar(Canvas& c) {
         c.FillRound(bx, by, bw, bh, 8, barBg);
         c.StrokeRound(bx, by, bw, bh, 8, p.border);
         struct SelAction { int action; const wchar_t* label; bool enabled; };
+        bool hasGroup = false;
+        for (auto& ref : inkSelection_) if (InkGroupOf(ref) != 0) { hasGroup = true; break; }
         SelAction actions[] = {
             { INK_COPY, L"复制", !inkSelection_.empty() },
             { INK_PASTE, L"粘贴", inkClipboardValid_ },
-            { INK_GROUP, L"组合", !inkSelection_.empty() },
-            { INK_UNGROUP, L"拆组", !inkSelection_.empty() },
+            { INK_GROUP, L"组合", inkSelection_.size() >= 2 },
+            { INK_UNGROUP, L"拆组", hasGroup },
             { INK_ROTATE, L"旋转", !inkSelection_.empty() },
-            { INK_DELETE, L"删除", !inkSelection_.empty() },
-            { INK_SAVE, L"保存", CanSaveNotes() && HasUnsavedNotes() }
+            { INK_DELETE, L"删除", !inkSelection_.empty() }
         };
-        for (int i = 0; i < 7; i++) {
+        for (int i = 0; i < 6; i++) {
             DRect r{ bx + 8 + i * 48.0f, by + 4, 44, bh - 8 };
             if (actions[i].enabled) inkButtons_.push_back({ r, actions[i].action });
             bool active = inkHover_ == actions[i].action && actions[i].enabled;
@@ -1517,7 +1665,7 @@ void DocView::PaintInkToolbar(Canvas& c) {
         c.StrokeRound(px, py, panelW, panelH, 8, p.border);
         int j = 0;
         for (int i = 0; i < 7; i++) {
-            if (mask & (1 << i)) continue;
+            if (i == 1 || (mask & (1 << i))) continue;
             DRect r{ px + 4 + j * itemW, py + 5, 28, 28 };
             inkButtons_.push_back({ r, INK_PEN + i });
             bool active = inkTool_ == i;
@@ -1556,7 +1704,7 @@ void DocView::InkAction(int action) {
         inkLasso_.clear();
         inkMoreOpen_ = false;
     } else if (action == INK_PALETTE) {
-        if (events_.openColorPicker) events_.openColorPicker();
+        if (events_.openColorPicker) events_.openColorPicker(-1);
     } else if (action == INK_COPY) {
         CopyInkSelection();
     } else if (action == INK_PASTE) {
@@ -1631,13 +1779,13 @@ void DocView::InkBegin(float x, float y) {
         return;
     }
     if (inkTool_ == INK_TOOL_HIGHLIGHT) {
-        // PDF has a text-aware highlighter handled in the mouse-down path.
-        // Other formats (and scanned PDFs) get the same freehand stroke as a
-        // pen, but with a translucent highlight color and a wider nib.
+        // Text-aware highlight for rendered text; freehand fallback elsewhere.
         if (CanHighlightPdf()) return;
+        if (BeginTextHighlight(x, y)) return;
         InkPushUndo();
         inkCurrent_ = InkStroke{};
-        inkCurrent_.color = HexColor(L"#FFD84D");
+        inkCurrent_.color = InkPalette()[(size_t)inkColor_];
+        inkCurrent_.color.a = 1.0f;
         inkCurrent_.width = std::max(12.0f, inkWidth_ * 4.0f);
         inkCurrent_.highlighter = true;
         inkCurrent_.points.push_back({ cx, cy });
@@ -1671,6 +1819,10 @@ void DocView::InkBegin(float x, float y) {
 }
 
 void DocView::InkMove(float x, float y) {
+    if (textHighlighting_) {
+        UpdateTextHighlight(x, y);
+        return;
+    }
     if (inkDrawing_) {
         float cx = 0, cy = 0;
         if (!InkScreenToContent(x, y, cx, cy)) return;
@@ -1697,78 +1849,93 @@ void DocView::InkEraseAt(float x, float y) {
     auto& layer = Ink();
     if (layer.strokes.empty() && layer.shapes.empty() && layer.texts.empty()) return;
     float radius = std::max(6.0f, inkWidth_ * 2.0f);
-    std::vector<InkStroke> keepStrokes;
-    keepStrokes.reserve(layer.strokes.size());
-    bool changed = false;
-    for (auto& s : layer.strokes) {
-        bool hit = false;
+    std::set<int> hitGroups;
+    std::set<std::pair<int, int>> hitItems;
+    auto hit = [&](int kind, int index, int group) {
+        if (group) hitGroups.insert(group);
+        else hitItems.insert({ kind, index });
+    };
+
+    for (int i = 0; i < (int)layer.strokes.size(); i++) {
+        auto& s = layer.strokes[(size_t)i];
+        bool touched = false;
         if (s.points.size() == 1) {
             float sx = 0, sy = 0;
             InkContentToScreen(s.points[0].x, s.points[0].y, sx, sy);
-            hit = (sx - x) * (sx - x) + (sy - y) * (sy - y) <= radius * radius;
-        } else {
+            touched = (sx - x) * (sx - x) + (sy - y) * (sy - y) <= radius * radius;
+        } else if (s.points.size() > 1) {
             float ax = 0, ay = 0;
             InkContentToScreen(s.points[0].x, s.points[0].y, ax, ay);
-            for (size_t i = 1; i < s.points.size(); i++) {
+            for (size_t k = 1; k < s.points.size(); k++) {
                 float bx = 0, by = 0;
-                InkContentToScreen(s.points[i].x, s.points[i].y, bx, by);
-                if (DistanceToSegment(x, y, ax, ay, bx, by) <= radius) { hit = true; break; }
+                InkContentToScreen(s.points[k].x, s.points[k].y, bx, by);
+                if (DistanceToSegment(x, y, ax, ay, bx, by) <= radius) { touched = true; break; }
                 ax = bx;
                 ay = by;
             }
         }
-        if (hit) changed = true;
-        else keepStrokes.push_back(s);
+        if (touched) hit(0, i, s.group);
     }
 
-    std::vector<InkShape> keepShapes;
-    keepShapes.reserve(layer.shapes.size());
-    for (auto& s : layer.shapes) {
+    for (int i = 0; i < (int)layer.shapes.size(); i++) {
+        auto& s = layer.shapes[(size_t)i];
         float ax = 0, ay = 0, bx = 0, by = 0;
         InkContentToScreen(s.a.x, s.a.y, ax, ay);
         InkContentToScreen(s.b.x, s.b.y, bx, by);
-        bool hit = false;
+        bool touched = false;
         if (s.kind == INK_SHAPE_LINE || s.kind == INK_SHAPE_ARROW) {
-            hit = DistanceToSegment(x, y, ax, ay, bx, by) <= radius;
+            touched = DistanceToSegment(x, y, ax, ay, bx, by) <= radius;
         } else if (s.kind == INK_SHAPE_RECT) {
             float x0 = std::min(ax, bx), y0 = std::min(ay, by);
             float x1 = std::max(ax, bx), y1 = std::max(ay, by);
-            hit = DistanceToSegment(x, y, x0, y0, x1, y0) <= radius ||
-                  DistanceToSegment(x, y, x1, y0, x1, y1) <= radius ||
-                  DistanceToSegment(x, y, x1, y1, x0, y1) <= radius ||
-                  DistanceToSegment(x, y, x0, y1, x0, y0) <= radius;
+            touched = DistanceToSegment(x, y, x0, y0, x1, y0) <= radius ||
+                      DistanceToSegment(x, y, x1, y0, x1, y1) <= radius ||
+                      DistanceToSegment(x, y, x1, y1, x0, y1) <= radius ||
+                      DistanceToSegment(x, y, x0, y1, x0, y0) <= radius;
         } else {
             float cx = (ax + bx) / 2, cy = (ay + by) / 2;
             float rx = std::abs(bx - ax) / 2, ry = std::abs(by - ay) / 2;
-            for (int i = 0; i < 48 && !hit; i++) {
-                float a0 = (float)i / 48 * 6.2831853f;
-                float a1 = (float)(i + 1) / 48 * 6.2831853f;
+            for (int k = 0; k < 48 && !touched; k++) {
+                float a0 = (float)k / 48 * 6.2831853f;
+                float a1 = (float)(k + 1) / 48 * 6.2831853f;
                 float p0x = cx + rx * std::cos(a0), p0y = cy + ry * std::sin(a0);
                 float p1x = cx + rx * std::cos(a1), p1y = cy + ry * std::sin(a1);
-                hit = DistanceToSegment(x, y, p0x, p0y, p1x, p1y) <= radius;
+                touched = DistanceToSegment(x, y, p0x, p0y, p1x, p1y) <= radius;
             }
         }
-        if (hit) changed = true;
-        else keepShapes.push_back(s);
+        if (touched) hit(1, i, s.group);
     }
 
-    std::vector<InkText> keepTexts;
-    keepTexts.reserve(layer.texts.size());
-    for (auto& t : layer.texts) {
+    for (int i = 0; i < (int)layer.texts.size(); i++) {
+        auto& t = layer.texts[(size_t)i];
         float sx = 0, sy = 0;
         InkContentToScreen(t.at.x, t.at.y, sx, sy);
         float w = InkTextWidth(t.text, t.size) + 8;
         float h = t.size * 1.5f;
         if (x >= sx - radius && x <= sx + w + radius &&
-            y >= sy - radius && y <= sy + h + radius) changed = true;
-        else keepTexts.push_back(t);
+            y >= sy - radius && y <= sy + h + radius) hit(2, i, t.group);
     }
 
-    if (!changed) return;
+    if (hitGroups.empty() && hitItems.empty()) return;
     if (!inkErasePushed_) {
         InkPushUndo();
         inkErasePushed_ = true;
     }
+    auto remove = [&](int kind, int index, int group) {
+        return (group && hitGroups.count(group)) || hitItems.count({ kind, index });
+    };
+    std::vector<InkStroke> keepStrokes;
+    keepStrokes.reserve(layer.strokes.size());
+    for (size_t i = 0; i < layer.strokes.size(); i++)
+        if (!remove(0, (int)i, layer.strokes[i].group)) keepStrokes.push_back(layer.strokes[i]);
+    std::vector<InkShape> keepShapes;
+    keepShapes.reserve(layer.shapes.size());
+    for (size_t i = 0; i < layer.shapes.size(); i++)
+        if (!remove(1, (int)i, layer.shapes[i].group)) keepShapes.push_back(layer.shapes[i]);
+    std::vector<InkText> keepTexts;
+    keepTexts.reserve(layer.texts.size());
+    for (size_t i = 0; i < layer.texts.size(); i++)
+        if (!remove(2, (int)i, layer.texts[i].group)) keepTexts.push_back(layer.texts[i]);
     layer.strokes = std::move(keepStrokes);
     layer.shapes = std::move(keepShapes);
     layer.texts = std::move(keepTexts);
@@ -1777,6 +1944,10 @@ void DocView::InkEraseAt(float x, float y) {
 }
 
 void DocView::InkEnd() {
+    if (textHighlighting_) {
+        FinishTextHighlight();
+        return;
+    }
     if (inkDrawing_) {
         if (!inkCurrent_.points.empty()) Ink().strokes.push_back(std::move(inkCurrent_));
         inkCurrent_ = InkStroke{};

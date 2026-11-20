@@ -5,8 +5,8 @@
 2 RCDATA "vendor/pdfium/pdfium.dll"
 
 VS_VERSION_INFO VERSIONINFO
- FILEVERSION 2,2,3,3
- PRODUCTVERSION 2,2,3,3
+ FILEVERSION 2,3,0,0
+ PRODUCTVERSION 2,3,0,0
  FILEFLAGSMASK 0x3fL
 #ifdef _DEBUG
  FILEFLAGS 0x1L
@@ -23,11 +23,11 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "openmd"
             VALUE "FileDescription", "openmd local document reader"
-            VALUE "FileVersion", "2.2.3.3"
+            VALUE "FileVersion", "2.3.0.0"
             VALUE "InternalName", "openmd"
             VALUE "OriginalFilename", "openmd.exe"
             VALUE "ProductName", "openmd"
-            VALUE "ProductVersion", "2.2.3.3"
+            VALUE "ProductVersion", "2.3.0.0"
         END
     END
     BLOCK "VarFileInfo"

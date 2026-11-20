@@ -153,17 +153,19 @@ bool DocView::Create(HWND parent, int id) {
 
 void DocView::SetSettings(Settings* settings) {
     settings_ = settings;
-    inkColors_ = InkColors();
+    inkColors_.clear();
     if (settings) {
-        inkColors_.push_back(settings->customColors[0]);
-        inkColors_.push_back(settings->customColors[1]);
-    } else {
-        inkColors_.push_back(Color(0.545f, 0.361f, 0.965f, 1.0f));
-        inkColors_.push_back(Color(0.063f, 0.725f, 0.506f, 1.0f));
+        for (int index : settings->inkToolbarPresets) {
+            if (index >= 0 && index < (int)settings->inkPresets.size() && inkColors_.size() < 5)
+                inkColors_.push_back(settings->inkPresets[(size_t)index]);
+        }
     }
+    if (inkColors_.empty()) inkColors_ = DefaultInkPresets();
+    if (inkColors_.size() > 5) inkColors_.resize(5);
     if (inkColor_ < 0 || inkColor_ >= (int)inkColors_.size()) inkColor_ = 0;
     if (settings_) {
-        dark_ = settings_->dark;
+        theme_ = settings_->theme;
+        dark_ = theme_ == L"dark";
         zoom_ = settings_->zoom;
         wheelStep_ = settings_->wheelStep;
         recent_ = settings_->recent;
@@ -171,9 +173,10 @@ void DocView::SetSettings(Settings* settings) {
     }
 }
 
-void DocView::ApplyTheme(bool dark) {
-    dark_ = dark;
-    ApplyDarkWindowTheme(hwnd_, dark);
+void DocView::ApplyTheme(const std::wstring& theme) {
+    theme_ = theme.empty() ? L"blue" : theme;
+    dark_ = theme_ == L"dark";
+    ApplyDarkWindowTheme(hwnd_, dark_);
     if (inkEditBrush_) {
         DeleteObject(inkEditBrush_);
         inkEditBrush_ = nullptr;
@@ -243,6 +246,9 @@ void DocView::ClearDocument() {
     inkDragMode_ = 0;
     inkSelectionBarRect_ = DRect{};
     pdfHighlights_.clear();
+    textHighlights_.clear();
+    textHighlightPending_.clear();
+    textHighlighting_ = false;
     pdfTextCache_.clear();
     pdfHighlighting_ = false;
     pdfHighlightPage_ = -1;
@@ -267,10 +273,12 @@ void DocView::SetDocument(std::unique_ptr<Document> doc, bool preserveScroll, bo
                    _wcsicmp(oldPath.c_str(), newPath.c_str()) == 0;
     std::map<int, InkLayer> savedLayers;
     std::map<int, std::vector<PdfHighlight>> savedHighlights;
+    std::vector<TextHighlight> savedTextHighlights;
     bool savedDirty = false;
     if (keepInk) {
         savedLayers = std::move(inkLayers_);
         savedHighlights = std::move(pdfHighlights_);
+        savedTextHighlights = std::move(textHighlights_);
         savedDirty = notesDirty_;
     }
     doc_ = std::move(doc);
@@ -316,6 +324,9 @@ void DocView::SetDocument(std::unique_ptr<Document> doc, bool preserveScroll, bo
     inkDragMode_ = 0;
     inkSelectionBarRect_ = DRect{};
     pdfHighlights_.clear();
+    textHighlights_.clear();
+    textHighlightPending_.clear();
+    textHighlighting_ = false;
     pdfTextCache_.clear();
     pdfHighlighting_ = false;
     pdfHighlightPage_ = -1;
@@ -351,6 +362,7 @@ void DocView::SetDocument(std::unique_ptr<Document> doc, bool preserveScroll, bo
     if (keepInk) {
         inkLayers_ = std::move(savedLayers);
         pdfHighlights_ = std::move(savedHighlights);
+        textHighlights_ = std::move(savedTextHighlights);
         notesDirty_ = savedDirty;
     } else {
         std::wstring noteError;
@@ -393,6 +405,9 @@ void DocView::SetError(const std::wstring& message, const std::wstring& path, co
     inkDragMode_ = 0;
     inkSelectionBarRect_ = DRect{};
     pdfHighlights_.clear();
+    textHighlights_.clear();
+    textHighlightPending_.clear();
+    textHighlighting_ = false;
     pdfTextCache_.clear();
     pdfHighlighting_ = false;
     pdfHighlightPage_ = -1;
@@ -417,7 +432,7 @@ bool DocView::CanOutline() const {
 void DocView::SetSource(bool source) {
     if (!doc_ || !CanSource() || sourceMode_ == source) return;
     if (inkEdit_) InkCommitText();
-    if (inkDrawing_ || inkErasing_ || inkShapeDrawing_) InkEnd();
+    if (inkDrawing_ || inkErasing_ || inkShapeDrawing_ || textHighlighting_) InkEnd();
     inkHover_ = 0;
     inkButtons_.clear();
     inkSelection_.clear();
@@ -1085,7 +1100,7 @@ void DocView::Paint() {
     if (!hwnd_) return;
     if (!canvas_) canvas_ = std::make_unique<Canvas>();
     Canvas& c = *canvas_;
-    if (!c.Begin(hwnd_, Palette::Get(dark_))) return;
+    if (!c.Begin(hwnd_, Palette::Get(theme_))) return;
     PaintContent(c);
     c.End();
 }
@@ -1164,13 +1179,61 @@ bool DocView::ExportPng(float scale, std::vector<uint8_t>& png, std::wstring* er
     }
     Canvas exportCanvas;
     if (!exportCanvas.BeginBitmap((UINT)pxW, (UINT)pxH, 96.0f * scale,
-                                  Palette::Get(dark_), true)) {
+                                  Palette::Get(theme_), true)) {
         if (error) *error = L"无法创建导出画布";
         return false;
     }
     float oldScrollX = scrollX_, oldScrollY = scrollY_;
     scrollX_ = 0;
     scrollY_ = 0;
+    exporting_ = true;
+    PaintContent(exportCanvas, true);
+    exporting_ = false;
+    scrollX_ = oldScrollX;
+    scrollY_ = oldScrollY;
+    if (!exportCanvas.EndBitmap(png) || png.empty()) {
+        if (error) *error = L"无法生成导出图片";
+        return false;
+    }
+    if (outW) *outW = (int)pxW;
+    if (outH) *outH = (int)pxH;
+    return true;
+}
+
+bool DocView::ExportPngPage(float scale, float offsetY, float pageHeight,
+                            std::vector<uint8_t>& png, std::wstring* error,
+                            int* outW, int* outH) {
+    if (error) error->clear();
+    png.clear();
+    if (!doc_) {
+        if (error) *error = L"当前没有可导出的内容";
+        return false;
+    }
+    if (inkDrawing_ || inkShapeDrawing_) InkEnd();
+    float viewW = PageWidth();
+    if (viewW < 1 || pageHeight < 1) {
+        if (error) *error = L"窗口尺寸无效";
+        return false;
+    }
+    if (!(scale > 0.05f && scale < 64.0f)) {
+        if (error) *error = L"缩放比例无效";
+        return false;
+    }
+    double pxW = std::round((double)viewW * scale);
+    double pxH = std::round((double)pageHeight * scale);
+    if (pxW < 16 || pxH < 16 || pxW > 20000 || pxH > 20000 ||
+        pxW * pxH > 120.0 * 1000.0 * 1000.0) {
+        if (error) *error = L"导出尺寸超出范围";
+        return false;
+    }
+    Canvas exportCanvas;
+    if (!exportCanvas.BeginBitmap((UINT)pxW, (UINT)pxH, 96.0f * scale, Palette::Get(theme_), true)) {
+        if (error) *error = L"无法创建导出画布";
+        return false;
+    }
+    float oldScrollX = scrollX_, oldScrollY = scrollY_;
+    scrollX_ = 0;
+    scrollY_ = std::max(0.0f, offsetY);
     exporting_ = true;
     PaintContent(exportCanvas, true);
     exporting_ = false;
@@ -1416,6 +1479,7 @@ void DocView::PaintDocument(Canvas& c) {
         c.FillRound(g.x, g.y, g.w, g.h, 12 * z, bg);
         if (g.role == 2) c.StrokeRound(g.x, g.y, g.w, g.h, 12 * z, p.border);
     }
+    PaintTextHighlights(c);
     for (auto& it : layout_->items) {
         if (it.y + it.h < scrollY_ - 100 || it.y > scrollY_ + c.heightDip() + 100) continue;
         const Block& b = *it.block;
@@ -1554,6 +1618,124 @@ void DocView::PaintDocument(Canvas& c) {
         }
     }
     c.PopClip();
+}
+
+void DocView::PaintTextHighlights(Canvas& c) {
+    if (!doc_ || !layout_ || (textHighlights_.empty() && textHighlightPending_.empty())) return;
+    auto drawRanges = [&](const std::vector<TextHighlight>& ranges, bool pending) {
+        for (auto& range : ranges) {
+            if (range.block < 0 || range.block >= (int)doc_->blocks.size()) continue;
+            const Block* block = &doc_->blocks[(size_t)range.block];
+            for (auto& item : layout_->items) {
+                if (item.block != block || !item.main.layout) continue;
+                int textLen = (int)item.main.text.size();
+                if (textLen <= 0) break;
+                int start = std::clamp(range.start, 0, textLen);
+                int length = std::clamp(range.length, 0, textLen - start);
+                if (length <= 0) break;
+                UINT32 actual = 0;
+                item.main.layout->HitTestTextRange((UINT32)start, (UINT32)length, 0, 0,
+                                                   nullptr, 0, &actual);
+                if (actual == 0) break;
+                std::vector<DWRITE_HIT_TEST_METRICS> metrics(actual);
+                if (FAILED(item.main.layout->HitTestTextRange((UINT32)start, (UINT32)length, 0, 0,
+                                                              metrics.data(), actual, &actual)))
+                    break;
+                Color color = pending ? CurrentInkColor() : range.color;
+                color.a = std::clamp(color.a * 0.55f, 0.12f, 0.45f);
+                for (UINT32 i = 0; i < actual; i++) {
+                    auto& m = metrics[i];
+                    if (m.width <= 0 || m.height <= 0) continue;
+                    c.FillRect(item.contentX + m.left, item.contentY + m.top, m.width, m.height, color);
+                }
+                break;
+            }
+        }
+    };
+    drawRanges(textHighlights_, false);
+    drawRanges(textHighlightPending_, true);
+}
+
+bool DocView::BeginTextHighlight(float sx, float sy) {
+    if (!doc_ || sourceMode_ || !layout_) return false;
+    int itemIndex = HitBlock(sx, sy + scrollY_);
+    if (itemIndex < 0 || itemIndex >= (int)layout_->items.size()) return false;
+    auto& item = layout_->items[(size_t)itemIndex];
+    if (!item.main.layout || item.main.text.empty()) return false;
+    BOOL trailing = FALSE, inside = FALSE;
+    DWRITE_HIT_TEST_METRICS metrics{};
+    if (FAILED(item.main.layout->HitTestPoint(sx - item.contentX, sy + scrollY_ - item.contentY,
+                                              &trailing, &inside, &metrics)))
+        return false;
+    int block = (int)(item.block - doc_->blocks.data());
+    if (block < 0 || block >= (int)doc_->blocks.size()) return false;
+    int pos = std::clamp((int)metrics.textPosition, 0, (int)item.main.text.size());
+    textHighlighting_ = true;
+    textHighlightStartBlock_ = textHighlightEndBlock_ = block;
+    textHighlightStartPos_ = textHighlightEndPos_ = pos;
+    textHighlightPending_.clear();
+    if (GetCapture() != hwnd_) SetCapture(hwnd_);
+    return true;
+}
+
+void DocView::UpdateTextHighlight(float sx, float sy) {
+    if (!textHighlighting_ || !doc_ || !layout_) return;
+    int itemIndex = HitBlock(sx, sy + scrollY_);
+    if (itemIndex < 0 || itemIndex >= (int)layout_->items.size()) return;
+    auto& item = layout_->items[(size_t)itemIndex];
+    if (!item.main.layout || item.main.text.empty()) return;
+    BOOL trailing = FALSE, inside = FALSE;
+    DWRITE_HIT_TEST_METRICS metrics{};
+    if (FAILED(item.main.layout->HitTestPoint(sx - item.contentX, sy + scrollY_ - item.contentY,
+                                              &trailing, &inside, &metrics)))
+        return;
+    int block = (int)(item.block - doc_->blocks.data());
+    if (block < 0 || block >= (int)doc_->blocks.size()) return;
+    textHighlightEndBlock_ = block;
+    textHighlightEndPos_ = std::clamp((int)metrics.textPosition, 0, (int)item.main.text.size());
+
+    int b0 = textHighlightStartBlock_, b1 = textHighlightEndBlock_;
+    int p0 = textHighlightStartPos_, p1 = textHighlightEndPos_;
+    if (b0 > b1 || (b0 == b1 && p0 > p1)) {
+        std::swap(b0, b1);
+        std::swap(p0, p1);
+    }
+    textHighlightPending_.clear();
+    auto addRange = [&](int block, int start, int length) {
+        if (length <= 0) return;
+        TextHighlight h;
+        h.block = block;
+        h.start = start;
+        h.length = length;
+        h.color = CurrentInkColor();
+        textHighlightPending_.push_back(h);
+    };
+    auto textLength = [&](int block) {
+        for (auto& it : layout_->items)
+            if (it.block == &doc_->blocks[(size_t)block]) return (int)it.main.text.size();
+        return 0;
+    };
+    if (b0 == b1) {
+        addRange(b0, p0, p1 - p0);
+    } else {
+        addRange(b0, p0, textLength(b0) - p0);
+        for (int block = b0 + 1; block < b1; block++) addRange(block, 0, textLength(block));
+        addRange(b1, 0, p1);
+    }
+    InvalidateAll();
+}
+
+void DocView::FinishTextHighlight() {
+    if (!textHighlighting_) return;
+    textHighlighting_ = false;
+    if (GetCapture() == hwnd_) ReleaseCapture();
+    if (!textHighlightPending_.empty()) {
+        InkPushUndo();
+        textHighlights_.insert(textHighlights_.end(), textHighlightPending_.begin(), textHighlightPending_.end());
+        textHighlightPending_.clear();
+        MarkNotesDirty();
+    }
+    InvalidateAll();
 }
 
 void DocView::PaintSource(Canvas& c) {
@@ -2400,7 +2582,7 @@ void DocView::OnMouseUp(int px, int py) {
         FinishPdfHighlight(x0, y0, x, y);
         return;
     }
-    if (inkDrawing_ || inkErasing_ || inkShapeDrawing_) {
+    if (inkDrawing_ || inkErasing_ || inkShapeDrawing_ || textHighlighting_) {
         InkEnd();
         return;
     }
@@ -2458,7 +2640,7 @@ void DocView::OnMouseMove(int px, int py) {
             SetCursor(LoadCursorW(nullptr, IDC_CROSS));
             return;
         }
-        if (inkDrawing_ || inkErasing_ || inkShapeDrawing_) {
+        if (inkDrawing_ || inkErasing_ || inkShapeDrawing_ || textHighlighting_) {
             InkMove(x, y);
             SetCursor(LoadCursorW(nullptr, IDC_CROSS));
             return;
@@ -2623,7 +2805,55 @@ void DocView::OnMouseWheel(int delta, bool ctrl, bool shift, float x, float y) {
 void DocView::OnKeyDown(WPARAM key) {
     // Customizable application/document shortcuts are handled by MainWindow's
     // message loop. Only context-local keys remain here.
-    if (inkMode_ && key == VK_ESCAPE) SetInkMode(false);
+    if (inkMode_ && key == VK_ESCAPE) {
+        if (!inkSelection_.empty()) {
+            inkSelection_.clear();
+            InvalidateAll();
+        } else {
+            SetInkMode(false);
+        }
+        return;
+    }
+    if (inkMode_ && key == VK_DELETE && !inkSelection_.empty()) {
+        DeleteInkSelection();
+        return;
+    }
+    bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+    if (inkMode_ && ctrl && (key == 'A' || key == 'D')) {
+        if (key == 'A') {
+            inkSelection_.clear();
+            auto& layer = Ink();
+            for (int i = 0; i < (int)layer.strokes.size(); i++) inkSelection_.push_back({ 0, i });
+            for (int i = 0; i < (int)layer.shapes.size(); i++) inkSelection_.push_back({ 1, i });
+            for (int i = 0; i < (int)layer.texts.size(); i++) inkSelection_.push_back({ 2, i });
+            InkNormalizeSelection();
+            InvalidateAll();
+        } else {
+            if (!inkSelection_.empty()) {
+                CopyInkSelection();
+                PasteInkSelection();
+            }
+        }
+        return;
+    }
+    if (inkMode_ && inkTool_ == INK_TOOL_SELECT && !inkSelection_.empty()) {
+        float step = (GetKeyState(VK_SHIFT) & 0x8000) ? 10.0f : 1.0f;
+        float dx = 0, dy = 0;
+        if (key == VK_LEFT) dx = -step;
+        else if (key == VK_RIGHT) dx = step;
+        else if (key == VK_UP) dy = -step;
+        else if (key == VK_DOWN) dy = step;
+        if (dx != 0 || dy != 0) {
+            InkNormalizeSelection();
+            auto& layer = Ink();
+            InkPushUndo();
+            inkDragBase_.strokes = layer.strokes;
+            inkDragBase_.shapes = layer.shapes;
+            inkDragBase_.texts = layer.texts;
+            InkApplySelectionTransform(1, dx, dy, 1.0f, 0.0f);
+            InvalidateAll();
+        }
+    }
 }
 
 void DocView::OnCopy() {
@@ -2815,7 +3045,7 @@ LRESULT DocView::Handle(UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_CAPTURECHANGED:
         if (middlePan_ && (HWND)lp != hwnd_) EndMiddlePan();
-        if ((inkDrawing_ || inkErasing_ || inkShapeDrawing_) && (HWND)lp != hwnd_) InkEnd();
+        if ((inkDrawing_ || inkErasing_ || inkShapeDrawing_ || textHighlighting_) && (HWND)lp != hwnd_) InkEnd();
         if (inkLassoing_ && (HWND)lp != hwnd_) {
             inkLassoing_ = false;
             inkLasso_.clear();
@@ -2853,7 +3083,7 @@ LRESULT DocView::Handle(UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_CTLCOLOREDIT: {
         HDC dc = (HDC)wp;
-        auto& p = Palette::Get(dark_);
+        auto& p = Palette::Get(theme_);
         SetTextColor(dc, ToColorRef(p.fg));
         SetBkColor(dc, ToColorRef(p.surface));
         if (!inkEditBrush_) inkEditBrush_ = CreateSolidBrush(ToColorRef(p.surface));
@@ -2865,6 +3095,25 @@ LRESULT DocView::Handle(UINT msg, WPARAM wp, LPARAM lp) {
     case WM_INK_CANCEL:
         InkCancelText();
         return 0;
+    case WM_RBUTTONUP: {
+        if (inkMode_) {
+            float sc = GetDpiForWindow(hwnd_) / 96.0f;
+            float x = GET_X_LPARAM(lp) / sc, y = GET_Y_LPARAM(lp) / sc;
+            if (inkBarRect_.Contains(x, y)) {
+                for (auto& b : inkButtons_) {
+                    int offset = b.action - INK_COLOR;
+                    if (offset < 0 || offset >= (int)inkColors_.size()) continue;
+                    if (!b.rect.Contains(x, y)) continue;
+                    int preset = offset;
+                    if (settings_ && offset < (int)settings_->inkToolbarPresets.size())
+                        preset = settings_->inkToolbarPresets[(size_t)offset];
+                    if (events_.openColorPicker) events_.openColorPicker(preset);
+                    return 0;
+                }
+            }
+        }
+        break;
+    }
     case WM_KEYDOWN:
         OnKeyDown(wp);
         return 0;
