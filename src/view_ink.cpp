@@ -1349,7 +1349,8 @@ void DocView::SelectInkColor(int index) {
     InvalidateAll();
 }
 
-void DocView::InkDrawStroke(Canvas& c, const InkStroke& stroke) {    if (stroke.points.empty()) return;
+void DocView::InkDrawStroke(Canvas& c, const InkStroke& stroke) {
+    if (stroke.points.empty()) return;
     Color color = stroke.color;
     float width = std::max(1.0f, stroke.width);
     if (stroke.highlighter) {
@@ -1358,17 +1359,14 @@ void DocView::InkDrawStroke(Canvas& c, const InkStroke& stroke) {    if (stroke.
     } else {
         color.a = std::clamp(stroke.color.a, 0.0f, 1.0f);
     }
-    float sx = 0, sy = 0;
-    InkContentToScreen(stroke.points[0].x, stroke.points[0].y, sx, sy);
-    c.FillCircle(sx, sy, width / 2, color);
-    for (size_t i = 1; i < stroke.points.size(); i++) {
-        float nx = 0, ny = 0;
-        InkContentToScreen(stroke.points[i].x, stroke.points[i].y, nx, ny);
-        c.DrawLine(sx, sy, nx, ny, color, width);
-        c.FillCircle(nx, ny, width / 2, color);
-        sx = nx;
-        sy = ny;
+    std::vector<D2D1_POINT_2F> points;
+    points.reserve(stroke.points.size());
+    for (auto& point : stroke.points) {
+        float x = 0, y = 0;
+        InkContentToScreen(point.x, point.y, x, y);
+        points.push_back(D2D1::Point2F(x, y));
     }
+    c.DrawStrokePath(points.data(), points.size(), color, width);
 }
 
 float DocView::InkTextWidth(const std::wstring& text, float size) const {

@@ -56,6 +56,70 @@ std::wstring HtmlEntity(const std::wstring& name) {
     return L"&" + name + L";";
 }
 
+std::wstring EmojiFor(const std::wstring& raw) {
+    std::wstring name = ToLower(raw);
+    static const std::map<std::wstring, std::wstring> table = {
+        { L"smile", L"😄" }, { L"grin", L"😁" }, { L"joy", L"😂" }, { L"wink", L"😉" },
+        { L"heart", L"❤️" }, { L"broken_heart", L"💔" }, { L"thumbsup", L"👍" }, { L"+1", L"👍" },
+        { L"thumbsdown", L"👎" }, { L"-1", L"👎" }, { L"ok_hand", L"👌" }, { L"clap", L"👏" },
+        { L"pray", L"🙏" }, { L"wave", L"👋" }, { L"fire", L"🔥" }, { L"star", L"⭐" },
+        { L"sparkles", L"✨" }, { L"tada", L"🎉" }, { L"rocket", L"🚀" }, { L"warning", L"⚠️" },
+        { L"bulb", L"💡" }, { L"check", L"✅" }, { L"x", L"❌" }, { L"heavy_check_mark", L"✔️" },
+        { L"information_source", L"ℹ️" }, { L"question", L"❓" }, { L"exclamation", L"❗" },
+        { L"book", L"📖" }, { L"books", L"📚" }, { L"memo", L"📝" }, { L"pushpin", L"📌" },
+        { L"link", L"🔗" }, { L"lock", L"🔒" }, { L"key", L"🔑" }, { L"gear", L"⚙️" },
+        { L"computer", L"💻" }, { L"package", L"📦" }, { L"chart", L"📊" }, { L"calendar", L"📅" },
+        { L"clock", L"🕒" }, { L"zap", L"⚡" }, { L"bug", L"🐛" }, { L"white_check_mark", L"✅" },
+        { L"eyes", L"👀" }, { L"thinking", L"🤔" }, { L"100", L"💯" }
+    };
+    auto it = table.find(name);
+    return it == table.end() ? L"" : it->second;
+}
+
+std::wstring SuperscriptNumber(const std::wstring& digits) {
+    static const wchar_t* map[] = { L"⁰", L"¹", L"²", L"³", L"⁴", L"⁵", L"⁶", L"⁷", L"⁸", L"⁹" };
+    std::wstring out;
+    for (wchar_t c : digits)
+        out += (c >= L'0' && c <= L'9') ? map[c - L'0'] : std::wstring(1, c);
+    return out;
+}
+
+std::wstring ScriptText(const std::wstring& text, bool superscript) {
+    static const wchar_t* supDigits[] = { L"⁰", L"¹", L"²", L"³", L"⁴", L"⁵", L"⁶", L"⁷", L"⁸", L"⁹" };
+    static const wchar_t* subDigits[] = { L"₀", L"₁", L"₂", L"₃", L"₄", L"₅", L"₆", L"₇", L"₈", L"₉" };
+    static const std::map<wchar_t, std::wstring> supLetters = {
+        { L'a', L"ᵃ" }, { L'b', L"ᵇ" }, { L'c', L"ᶜ" }, { L'd', L"ᵈ" }, { L'e', L"ᵉ" },
+        { L'f', L"ᶠ" }, { L'g', L"ᵍ" }, { L'h', L"ʰ" }, { L'i', L"ⁱ" }, { L'j', L"ʲ" },
+        { L'k', L"ᵏ" }, { L'l', L"ˡ" }, { L'm', L"ᵐ" }, { L'n', L"ⁿ" }, { L'o', L"ᵒ" },
+        { L'p', L"ᵖ" }, { L'r', L"ʳ" }, { L's', L"ˢ" }, { L't', L"ᵗ" }, { L'u', L"ᵘ" },
+        { L'v', L"ᵛ" }, { L'w', L"ʷ" }, { L'x', L"ˣ" }, { L'y', L"ʸ" }, { L'z', L"ᶻ" },
+        { L'A', L"ᴬ" }, { L'B', L"ᴮ" }, { L'D', L"ᴰ" }, { L'E', L"ᴱ" }, { L'G', L"ᴳ" },
+        { L'H', L"ᴴ" }, { L'I', L"ᴵ" }, { L'J', L"ᴶ" }, { L'K', L"ᴷ" }, { L'L', L"ᴸ" },
+        { L'M', L"ᴹ" }, { L'N', L"ᴺ" }, { L'O', L"ᴼ" }, { L'P', L"ᴾ" }, { L'R', L"ᴿ" },
+        { L'T', L"ᵀ" }, { L'U', L"ᵁ" }, { L'V', L"ⱽ" }, { L'W', L"ᵂ" },
+        { L'+', L"⁺" }, { L'-', L"⁻" }, { L'=', L"⁼" }, { L'(', L"⁽" }, { L')', L"⁾" }
+    };
+    static const std::map<wchar_t, std::wstring> subLetters = {
+        { L'a', L"ₐ" }, { L'e', L"ₑ" }, { L'h', L"ₕ" }, { L'i', L"ᵢ" }, { L'j', L"ⱼ" },
+        { L'k', L"ₖ" }, { L'l', L"ₗ" }, { L'm', L"ₘ" }, { L'n', L"ₙ" }, { L'o', L"ₒ" },
+        { L'p', L"ₚ" }, { L'r', L"ᵣ" }, { L's', L"ₛ" }, { L't', L"ₜ" }, { L'u', L"ᵤ" },
+        { L'v', L"ᵥ" }, { L'x', L"ₓ" },
+        { L'+', L"₊" }, { L'-', L"₋" }, { L'=', L"₌" }, { L'(', L"₍" }, { L')', L"₎" }
+    };
+    std::wstring out;
+    for (wchar_t c : text) {
+        if (c >= L'0' && c <= L'9') {
+            out += superscript ? supDigits[c - L'0'] : subDigits[c - L'0'];
+            continue;
+        }
+        const auto& table = superscript ? supLetters : subLetters;
+        auto it = table.find(c);
+        if (it != table.end()) out += it->second;
+        else out += c;
+    }
+    return out;
+}
+
 std::wstring DecodeEntities(const std::wstring& s) {
     std::wstring out;
     for (size_t i = 0; i < s.size(); i++) {
@@ -107,7 +171,7 @@ void AddRun(std::vector<Inline>& out, Inline run) {
         if (!prev.math && prev.bold == run.bold && prev.italic == run.italic &&
             prev.underline == run.underline && prev.strike == run.strike &&
             prev.code == run.code && prev.link == run.link && prev.url == run.url &&
-            prev.role == run.role) {
+            prev.highlight == run.highlight && prev.role == run.role) {
             prev.text += run.text;
             return;
         }
@@ -277,6 +341,52 @@ struct InlineParser {
                         out.insert(out.end(), inner.begin(), inner.end());
                         i = next;
                         continue;
+                    }
+                }
+            }
+            if ((c == L'^' || c == L'~') && i + 1 < to && s[(size_t)i + 1] != c) {
+                size_t close = s.find(c, (size_t)i + 1);
+                if (close != std::wstring::npos && (int)close < to && close > (size_t)i + 1 &&
+                    close - (size_t)i <= 42) {
+                    std::wstring inner = s.substr((size_t)i + 1, close - (size_t)i - 1);
+                    bool simple = inner.find(L'\n') == std::wstring::npos;
+                    for (wchar_t x : inner)
+                        if (x == L'*' || x == L'_' || x == L'`' || x == L'[' || x == L'$') {
+                            simple = false;
+                            break;
+                        }
+                    if (simple) {
+                        buf += ScriptText(inner, c == L'^');
+                        i = (int)close + 1;
+                        continue;
+                    }
+                }
+            }
+            if (c == L'=' && i + 1 < to && s[(size_t)i + 1] == L'=') {
+                size_t close = s.find(L"==", (size_t)i + 2);
+                if (close != std::wstring::npos && (int)close < to && close > (size_t)i + 2) {
+                    flush();
+                    std::vector<Inline> inner = Parse(s, i + 2, (int)close, bold, italic, strike, link, url);
+                    for (auto& r : inner) r.highlight = true;
+                    out.insert(out.end(), inner.begin(), inner.end());
+                    i = (int)close + 2;
+                    continue;
+                }
+            }
+            if (c == L':' && i + 1 < to) {
+                size_t close = s.find(L':', (size_t)i + 1);
+                if (close != std::wstring::npos && close > (size_t)i + 1 && close - (size_t)i <= 34) {
+                    std::wstring name = s.substr((size_t)i + 1, close - (size_t)i - 1);
+                    bool valid = !name.empty();
+                    for (wchar_t x : name)
+                        if (!iswalnum(x) && x != L'_' && x != L'+' && x != L'-') { valid = false; break; }
+                    if (valid) {
+                        std::wstring emoji = EmojiFor(name);
+                        if (!emoji.empty()) {
+                            buf += emoji;
+                            i = (int)close + 1;
+                            continue;
+                        }
                     }
                 }
             }
@@ -824,12 +934,57 @@ std::vector<Block> ParseBlocks(const std::vector<std::wstring>& lines, const Mar
                 } else if (IsBlank(l)) {
                     if (i + 1 < n) {
                         std::wstring nx = TrimLeft(lines[(size_t)i + 1]);
-                        if (!nx.empty() && nx[0] == L'>') { inner.push_back(L""); i++; continue; }
+                        if (!nx.empty() && nx[0] == L'>') {
+                            std::wstring after = TrimLeft(nx.substr(1));
+                            bool nextAlert = after.size() >= 4 && after[0] == L'[' &&
+                                             after[1] == L'!' && after.back() == L']';
+                            if (nextAlert) break;
+                            inner.push_back(L"");
+                            i++;
+                            continue;
+                        }
                     }
                     break;
                 } else break;
             }
+            std::wstring alertLabel;
+            bool alertDanger = false;
+            for (size_t k = 0; k < inner.size(); k++) {
+                std::wstring t = Trim(inner[k]);
+                if (t.size() < 4 || t[0] != L'[' || t[1] != L'!' || t.back() != L']') continue;
+                std::wstring type = ToLower(t.substr(2, t.size() - 3));
+                if (type == L"note") alertLabel = L"说明";
+                else if (type == L"tip") alertLabel = L"提示";
+                else if (type == L"important") alertLabel = L"重要";
+                else if (type == L"warning") { alertLabel = L"警告"; alertDanger = true; }
+                else if (type == L"caution") { alertLabel = L"注意"; alertDanger = true; }
+                else break;
+                inner.erase(inner.begin() + (std::ptrdiff_t)k);
+                break;
+            }
             std::vector<Block> sub = ParseBlocks(inner, ctx, refs, anchors, true, depth + 1);
+            if (!alertLabel.empty()) {
+                Inline badge;
+                badge.text = alertLabel + L"  ";
+                badge.bold = true;
+                badge.role = alertDanger ? InlineRole::Danger : InlineRole::Accent;
+                bool placed = false;
+                if (!sub.empty()) {
+                    Block& first = sub.front();
+                    if (first.kind == BlockKind::Paragraph || first.kind == BlockKind::ListItem ||
+                        first.kind == BlockKind::Quote || first.kind == BlockKind::Heading) {
+                        first.inlines.insert(first.inlines.begin(), badge);
+                        placed = true;
+                    }
+                }
+                if (!placed) {
+                    Block label;
+                    label.kind = BlockKind::Paragraph;
+                    label.quote = true;
+                    label.inlines.push_back(badge);
+                    out.push_back(std::move(label));
+                }
+            }
             for (auto& b : sub) { b.quote = true; out.push_back(std::move(b)); }
             continue;
         }
@@ -968,23 +1123,36 @@ std::vector<Block> ParseMarkdown(const std::wstring& text, const MarkdownContext
     std::vector<std::wstring> lines = SplitLines(src);
 
     std::map<std::wstring, std::wstring> refs;
+    std::map<std::wstring, std::wstring> footnotes;
     std::vector<std::wstring> filtered;
     filtered.reserve(lines.size());
-    // Extract link reference definitions outside code fences.
+    // Extract link/footnote reference definitions outside code fences.
     bool inFence = false;
-    wchar_t fenceChar = 0;
-    int fenceLen = 0;
-    for (auto& l : lines) {
+    for (size_t li = 0; li < lines.size(); li++) {
+        const std::wstring& l = lines[li];
         std::wstring info;
         wchar_t fc = 0; int fl = 0;
         if (IsFence(l, info, fc, fl)) {
             inFence = !inFence;
-            fenceChar = fc; fenceLen = fl;
             filtered.push_back(l);
             continue;
         }
         if (!inFence) {
             std::wstring t = TrimLeft(l);
+            if (t.size() > 4 && t[0] == L'[' && t[1] == L'^') {
+                size_t close = t.find(L"]:");
+                if (close != std::wstring::npos && close > 2) {
+                    std::wstring id = ToLower(Trim(t.substr(2, close - 2)));
+                    std::wstring body = Trim(t.substr(close + 2));
+                    while (li + 1 < lines.size()) {
+                        std::wstring next = lines[li + 1];
+                        if (next.empty() || (next[0] != L' ' && next[0] != L'\t')) break;
+                        body += L" " + Trim(next);
+                        li++;
+                    }
+                    if (!id.empty()) { footnotes[id] = body; continue; }
+                }
+            }
             if (t.size() > 3 && t[0] == L'[') {
                 size_t close = t.find(L"]:");
                 if (close != std::wstring::npos) {
@@ -1000,8 +1168,62 @@ std::vector<Block> ParseMarkdown(const std::wstring& text, const MarkdownContext
         }
         filtered.push_back(l);
     }
+
+    std::map<std::wstring, int> usedFootnotes;
+    std::vector<std::wstring> usedOrder;
+    if (!footnotes.empty()) {
+        inFence = false;
+        for (auto& l : filtered) {
+            std::wstring info;
+            wchar_t fc = 0; int fl = 0;
+            if (IsFence(l, info, fc, fl)) { inFence = !inFence; continue; }
+            if (inFence) continue;
+            std::wstring replaced;
+            for (size_t i = 0; i < l.size();) {
+                if (l[i] == L'[' && i + 1 < l.size() && l[i + 1] == L'^') {
+                    size_t close = l.find(L']', i + 2);
+                    if (close != std::wstring::npos) {
+                        std::wstring id = ToLower(Trim(l.substr(i + 2, close - i - 2)));
+                        auto it = footnotes.find(id);
+                        if (it != footnotes.end()) {
+                            auto seen = usedFootnotes.find(id);
+                            int number = 0;
+                            if (seen == usedFootnotes.end()) {
+                                number = (int)usedOrder.size() + 1;
+                                usedFootnotes[id] = number;
+                                usedOrder.push_back(id);
+                            } else {
+                                number = seen->second;
+                            }
+                            replaced += SuperscriptNumber(std::to_wstring(number));
+                            i = close + 1;
+                            continue;
+                        }
+                    }
+                }
+                replaced += l[i++];
+            }
+            l = replaced;
+        }
+    }
+
     std::set<std::wstring> anchors;
-    return ParseBlocks(filtered, ctx, refs, anchors, false);
+    std::vector<Block> blocks = ParseBlocks(filtered, ctx, refs, anchors, false);
+    if (!usedOrder.empty()) {
+        Block hr;
+        hr.kind = BlockKind::Hr;
+        blocks.push_back(std::move(hr));
+        for (auto& id : usedOrder) {
+            auto it = footnotes.find(id);
+            if (it == footnotes.end()) continue;
+            Block note;
+            note.kind = BlockKind::Paragraph;
+            note.text = SuperscriptNumber(std::to_wstring(usedFootnotes[id])) + L"  " + it->second;
+            note.inlines = ParseMarkdownInlines(note.text, ctx, &refs);
+            blocks.push_back(std::move(note));
+        }
+    }
+    return blocks;
 }
 
 // ---------------------------------------------------------------- highlight

@@ -35,6 +35,7 @@ struct TextEffect : IUnknown {
     InlineRole role = InlineRole::Text;
     bool inlineCode = false;
     bool link = false;
+    bool highlight = false;
     std::wstring url;
     ULONG refs = 1;
 
@@ -125,6 +126,8 @@ public:
     void StrokeRound(float x, float y, float w, float h, float r, const Color& c, float thickness = 1.0f);
     void DrawEllipse(float cx, float cy, float rx, float ry, const Color& c, float thickness = 1.0f);
     void DrawLine(float x1, float y1, float x2, float y2, const Color& c, float thickness = 1.0f);
+    void DrawStrokePath(const D2D1_POINT_2F* points, size_t count, const Color& c,
+                        float thickness, bool round = true);
     void FillCircle(float cx, float cy, float r, const Color& c);
     void DrawText(const std::wstring& text, float x, float y, float w, float h, float size,
                   const Color& color, bool bold = false, bool mono = false,

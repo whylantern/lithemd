@@ -1053,6 +1053,27 @@ bool EnsureDir(const std::wstring& path) {
     if (!parent.empty() && parent != path && !DirExists(parent)) EnsureDir(parent);
     return CreateDirectoryW(path.c_str(), nullptr) != FALSE || GetLastError() == ERROR_ALREADY_EXISTS;
 }
+void RemoveTree(const std::wstring& path) {
+    if (path.empty()) return;
+    WIN32_FIND_DATAW fd{};
+    HANDLE find = FindFirstFileW(PathJoin(path, L"*").c_str(), &fd);
+    if (find != INVALID_HANDLE_VALUE) {
+        do {
+            std::wstring name = fd.cFileName;
+            if (name == L"." || name == L"..") continue;
+            std::wstring child = PathJoin(path, name);
+            if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) &&
+                !(fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) {
+                RemoveTree(child);
+            } else {
+                SetFileAttributesW(child.c_str(), FILE_ATTRIBUTE_NORMAL);
+                DeleteFileW(child.c_str());
+            }
+        } while (FindNextFileW(find, &fd));
+        FindClose(find);
+    }
+    RemoveDirectoryW(path.c_str());
+}
 uint64_t FileWriteTimeUtc(const std::wstring& path) {
     WIN32_FILE_ATTRIBUTE_DATA d{};
     if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &d)) return 0;
@@ -1592,6 +1613,9 @@ static std::wstring NodeText(const JNode* n) {
 
 void Settings::Clamp() {
     if (!(zoom >= 0.6 && zoom <= 2.5)) zoom = 1.0;
+    if (!(fontScale >= MinFontScale && fontScale <= MaxFontScale)) fontScale = 1.0;
+    fontScale = std::round(fontScale * 100.0) / 100.0;
+    contentWidth = std::clamp(contentWidth, MinContentWidth, MaxContentWidth);
     if (wheelStep < MinWheelStep || wheelStep > MaxWheelStep) wheelStep = 3;
     inkToolsVisible &= 0x7F;
     canvasWidth = std::clamp(canvasWidth, MinCanvasSize, MaxCanvasSize);
@@ -1641,6 +1665,7 @@ void Settings::Clamp() {
     if ((int)documentLanguage < (int)DocLanguage::Auto ||
         (int)documentLanguage > (int)DocLanguage::Western) documentLanguage = DocLanguage::Auto;
     while (recent.size() > MaxRecent) recent.pop_back();
+    while (recentBlocked.size() > MaxRecent) recentBlocked.erase(recentBlocked.begin());
 }
 
 Settings Settings::Load() {
@@ -1674,6 +1699,15 @@ Settings Settings::Load() {
                     s.dark = (v == L"true" || v == L"1");
                 }
                 else if (key == L"zoom") s.zoom = m.second.number > 0 ? m.second.number : 1.0;
+                else if (key == L"fontscale" || key == L"bodyscale")
+                    s.fontScale = m.second.number > 0 ? m.second.number : 1.0;
+                else if (key == L"contentwidth" || key == L"pagewidth")
+                    s.contentWidth = (int)m.second.number;
+                else if (key == L"workspaceroot") s.workspaceRoot = NodeText(&m.second);
+                else if (key == L"workspacevisible") {
+                    std::wstring v = ToLower(NodeText(&m.second));
+                    s.workspaceVisible = (v == L"true" || v == L"1");
+                }
                 else if (key == L"wheelstep" || key == L"wheelsteps") s.wheelStep = (int)m.second.number;
                 else if (key == L"inktools" || key == L"inktoolsvisible")
                     s.inkToolsVisible = (int)m.second.number;
@@ -1735,6 +1769,14 @@ Settings Settings::Load() {
                         if (!v.empty()) s.recent.push_back(v);
                     }
                 }
+                else if ((key == L"recentblocked" || key == L"recentdeleted") &&
+                         m.second.kind == JKind::Array) {
+                    s.recentBlocked.clear();
+                    for (auto& it : m.second.items) {
+                        std::wstring v = it.Text();
+                        if (!v.empty()) s.recentBlocked.push_back(v);
+                    }
+                }
             }
         }
     }
@@ -1773,6 +1815,11 @@ bool Settings::Save() {
     wchar_t z[32];
     swprintf(z, 32, L"%.2f", zoom);
     out += L"  \"zoom\": "; out += z; out += L",\n";
+    swprintf(z, 32, L"%.2f", fontScale);
+    out += L"  \"fontScale\": "; out += z; out += L",\n";
+    out += L"  \"contentWidth\": " + std::to_wstring(contentWidth) + L",\n";
+    out += L"  \"workspaceRoot\": " + JsonEscape(workspaceRoot) + L",\n";
+    out += std::wstring(L"  \"workspaceVisible\": ") + (workspaceVisible ? L"true" : L"false") + L",\n";
     out += L"  \"wheelStep\": " + std::to_wstring(wheelStep) + L",\n";
     out += L"  \"inkToolsVisible\": " + std::to_wstring(inkToolsVisible) + L",\n";
     out += L"  \"canvasWidth\": " + std::to_wstring(canvasWidth) + L",\n";
@@ -1813,12 +1860,23 @@ bool Settings::Save() {
         out += L"  },\n";
     }
     out += L"  \"recent\": [";
-    if (recent.empty()) out += L"]\n";
+    if (recent.empty()) out += L"],\n";
     else {
         out += L"\n";
         for (size_t i = 0; i < recent.size(); i++) {
             out += L"    " + JsonEscape(recent[i]);
             if (i + 1 < recent.size()) out += L",";
+            out += L"\n";
+        }
+        out += L"  ],\n";
+    }
+    out += L"  \"recentBlocked\": [";
+    if (recentBlocked.empty()) out += L"]\n";
+    else {
+        out += L"\n";
+        for (size_t i = 0; i < recentBlocked.size(); i++) {
+            out += L"    " + JsonEscape(recentBlocked[i]);
+            if (i + 1 < recentBlocked.size()) out += L",";
             out += L"\n";
         }
         out += L"  ]\n";
@@ -1833,12 +1891,38 @@ bool Settings::Save() {
     return false;
 }
 
+bool Settings::RecentBlocked(const std::wstring& path) const {
+    std::wstring full = AbsolutePath(path);
+    for (auto& p : recentBlocked)
+        if (_wcsicmp(p.c_str(), full.c_str()) == 0) return true;
+    return false;
+}
+
 void Settings::AddRecent(const std::wstring& path) {
     std::wstring full = AbsolutePath(path);
+    if (RecentBlocked(full)) return;
     recent.erase(std::remove_if(recent.begin(), recent.end(), [&](const std::wstring& p) {
         return _wcsicmp(p.c_str(), full.c_str()) == 0;
     }), recent.end());
     recent.insert(recent.begin(), full);
     while (recent.size() > MaxRecent) recent.pop_back();
+    Save();
+}
+
+void Settings::RemoveRecent(const std::wstring& path) {
+    std::wstring full = AbsolutePath(path);
+    recent.erase(std::remove_if(recent.begin(), recent.end(), [&](const std::wstring& p) {
+        return _wcsicmp(p.c_str(), full.c_str()) == 0;
+    }), recent.end());
+    bool known = false;
+    for (auto& p : recentBlocked)
+        if (_wcsicmp(p.c_str(), full.c_str()) == 0) { known = true; break; }
+    if (!known) recentBlocked.push_back(full);
+    Save();
+}
+
+void Settings::ClearRecent() {
+    recent.clear();
+    recentBlocked.clear();
     Save();
 }

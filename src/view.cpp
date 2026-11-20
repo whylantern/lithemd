@@ -200,6 +200,24 @@ void DocView::SetZoom(double zoom) {
     if (events_.statusChanged) events_.statusChanged();
 }
 
+void DocView::SetFontScale(double scale) {
+    double next = std::clamp(scale, Settings::MinFontScale, Settings::MaxFontScale);
+    if (std::abs(next - fontScale_) < 0.001) return;
+    fontScale_ = next;
+    layoutDirty_ = true;
+    UpdateScrollBars();
+    InvalidateAll();
+}
+
+void DocView::SetContentWidth(int width) {
+    int next = std::clamp(width, Settings::MinContentWidth, Settings::MaxContentWidth);
+    if (next == contentWidth_) return;
+    contentWidth_ = next;
+    layoutDirty_ = true;
+    UpdateScrollBars();
+    InvalidateAll();
+}
+
 void DocView::SetWheelStep(int step) {
     wheelStep_ = step < 1 ? 1 : (step > 10 ? 10 : step);
 }
@@ -488,6 +506,25 @@ float DocView::PageWidth() const {
     return (rc.right - rc.left) / scale;
 }
 
+int DocView::VisibleHeadingBlock() const {
+    if (!doc_ || doc_->outline.empty()) return -1;
+    if (layoutDirty_ || !layout_) const_cast<DocView*>(this)->RelayoutIfNeeded();
+    if (!layout_) return -1;
+    float top = scrollY_ + heightDip() * 0.12f;
+    int current = doc_->outline.front().block;
+    for (auto& heading : doc_->outline) {
+        const Block* target = &doc_->blocks[(size_t)heading.block];
+        float y = -1;
+        for (auto& item : layout_->items) {
+            if (item.block == target) { y = item.y; break; }
+        }
+        if (y < 0) continue;
+        if (y <= top) current = heading.block;
+        else break;
+    }
+    return current;
+}
+
 float DocView::heightDip() const {
     RECT rc{};
     GetClientRect(hwnd_, &rc);
@@ -653,11 +690,12 @@ void DocView::RelayoutIfNeeded() {
     lastWidth_ = viewW;
     layoutDirty_ = false;
     auto lay = std::make_shared<Layout>();
-    float contentW = std::min(viewW - 2 * kMargin, 1040.0f);
+    float contentW = std::min(viewW - 2 * kMargin, (float)contentWidth_);
     if (contentW < 220) contentW = std::max(120.0f, viewW - 24.0f);
     float left = (viewW - contentW) / 2;
     if (left < 16) left = 16;
     float z = (float)zoom_;
+    float fs = (float)fontScale_;
     float y = 26.0f * z;
     float bottomPad = 40.0f * z;
     int previousChatGroup = -1;
@@ -693,7 +731,7 @@ void DocView::RelayoutIfNeeded() {
         switch (b.kind) {
         case BlockKind::Heading: {
             float size = (b.level <= 1 ? 30.0f : b.level == 2 ? 24.0f : b.level == 3 ? 20.0f :
-                          b.level == 4 ? 18.0f : 16.0f) * z;
+                          b.level == 4 ? 18.0f : 16.0f) * z * fs;
             y += (b.level <= 1 ? 26.0f : 18.0f) * z;
             TextStyleOptions o = BodyOpts(size, w, true);
             o.lineHeight = 1.3f;
@@ -708,7 +746,7 @@ void DocView::RelayoutIfNeeded() {
         case BlockKind::Paragraph:
         case BlockKind::Quote: {
             float indent = b.quote ? 16.0f * z : 0.0f;
-            TextStyleOptions o = BodyOpts(kBaseBody * z, w - indent);
+            TextStyleOptions o = BodyOpts(kBaseBody * z * fs, w - indent);
             o.align = AlignOf(b.align);
             TuneForMath(o, b.inlines);
             BuildRichText(b.inlines, o, it.main);
@@ -719,7 +757,7 @@ void DocView::RelayoutIfNeeded() {
         case BlockKind::ListItem: {
             float indent = std::min(6, b.indent) * 22.0f * z;
             float markerW = 24.0f * z + (b.task ? 6.0f * z : 0);
-            TextStyleOptions o = BodyOpts(kBaseBody * z, w - indent - markerW);
+            TextStyleOptions o = BodyOpts(kBaseBody * z * fs, w - indent - markerW);
             TuneForMath(o, b.inlines);
             BuildRichText(b.inlines, o, it.main);
             it.contentX = x + indent + markerW;
@@ -739,7 +777,7 @@ void DocView::RelayoutIfNeeded() {
                 labelH = 20 * z;
             }
             float innerW = w - pad * 2;
-            TextStyleOptions o = CodeOpts((out ? 13.0f : 13.5f) * z, innerW,
+            TextStyleOptions o = CodeOpts((out ? 13.0f : 13.5f) * z * fs, innerW,
                                           b.error ? InlineRole::Danger : InlineRole::Text);
             const std::vector<Inline>* inlines = &b.inlines;
             std::vector<Inline> fallback;
@@ -812,7 +850,7 @@ void DocView::RelayoutIfNeeded() {
                         cell.header = row.empty() ? false : row[0].header;
                         if (c < (int)row.size()) {
                             bool hdr = row[(size_t)c].header || cell.header;
-                            TextStyleOptions o = BodyOpts(14.0f * z, cell.w - 16 * z, hdr);
+                            TextStyleOptions o = BodyOpts(14.0f * z * fs, cell.w - 16 * z, hdr);
                             o.lineHeight = 1.45f;
                             o.baseline = 1.2f;
                             int align = c < (int)b.table.aligns.size() ? b.table.aligns[(size_t)c] : row[(size_t)c].align;
@@ -864,7 +902,7 @@ void DocView::RelayoutIfNeeded() {
         case BlockKind::Session: {
             float pad = 18.0f * z;
             float labelH = 18.0f * z;
-            TextStyleOptions o = BodyOpts(23.0f * z, w - pad * 2, true);
+            TextStyleOptions o = BodyOpts(23.0f * z * fs, w - pad * 2, true);
             o.lineHeight = 1.25f;
             o.baseline = 1.0f;
             BuildPlainRichText(b.text.empty() ? L"LitheMD" : b.text, o, it.main);
@@ -896,8 +934,8 @@ void DocView::RelayoutIfNeeded() {
             it.contentX = x + pad + (b.collapsible ? 16 * z : 0);
             it.contentY = y + pad + headerH;
             if (b.expanded && !b.text.empty()) {
-                TextStyleOptions o = (b.kind == BlockKind::Tool ? CodeOpts(12.5f * z, w - pad * 2 - 16 * z)
-                                                                : BodyOpts(13.5f * z, w - pad * 2 - 16 * z));
+                TextStyleOptions o = (b.kind == BlockKind::Tool ? CodeOpts(12.5f * z * fs, w - pad * 2 - 16 * z)
+                                                                : BodyOpts(13.5f * z * fs, w - pad * 2 - 16 * z));
                 o.lineHeight = 1.5f;
                 BuildPlainRichText(b.text, o, it.main);
                 it.h = pad * 2 + headerH + it.main.height + 6 * z;
@@ -907,7 +945,7 @@ void DocView::RelayoutIfNeeded() {
         } break;
         case BlockKind::Banner: {
             float pad = 14.0f * z;
-            TextStyleOptions o = BodyOpts(15.0f * z, w - pad * 2);
+            TextStyleOptions o = BodyOpts(15.0f * z * fs, w - pad * 2);
             BuildPlainRichText(b.text, o, it.main);
             it.label = b.label;
             it.badge = b.badge;
@@ -1081,6 +1119,7 @@ void DocView::UpdateScrollBars() {
         horzScrollShown_ = showH;
         ShowScrollBar(hwnd_, SB_HORZ, showH);
     }
+    if (events_.statusChanged) events_.statusChanged();
     // The home page itself never scrolls; the recent-file list has its own
     // embedded scroll region.
     if (m == Mode::Welcome) {
@@ -1347,12 +1386,16 @@ void DocView::PaintWelcome(Canvas& c) {
                DWRITE_TEXT_ALIGNMENT_CENTER);
 
     float btnW = 154, btnH = 42;
-    float btnX = cx - btnW / 2, btnY = top + 174;
+    float btnX = cx - btnW - 6, btnY = top + 174;
     welcomeOpenRect_ = { btnX, btnY, btnW, btnH };
     c.FillRound(btnX, btnY, btnW, btnH, 8, c.palette().accent);
     c.DrawText(L"打开文件", btnX, btnY + 1, btnW, btnH - 2, 14, HexColor(L"#FFFFFF"), true, false,
                DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-    c.DrawText(L"Ctrl+O   ·   也可以把文件直接拖进窗口", cx - 300, btnY + 50, 600, 22, 12,
+    welcomeFolderRect_ = { btnX + btnW + 12, btnY, btnW, btnH };
+    c.StrokeRound(welcomeFolderRect_.x, welcomeFolderRect_.y, btnW, btnH, 8, c.palette().border);
+    c.DrawText(L"打开文件夹", welcomeFolderRect_.x, btnY + 1, btnW, btnH - 2, 13, c.palette().fg, false, false,
+               DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+    c.DrawText(L"Ctrl+O 打开文件   ·   Ctrl+L 输入路径   ·   可拖入文件或文件夹", cx - 340, btnY + 50, 680, 22, 12,
                c.palette().muted, false, false, DWRITE_TEXT_ALIGNMENT_CENTER);
 
     std::vector<std::wstring> chips = { L"Markdown", L"JSON", L"Notebook", L"CSV", L"PDF", L"Word", L"Excel", L"纯文本" };
@@ -1374,9 +1417,11 @@ void DocView::PaintWelcome(Canvas& c) {
     }
 
     welcomeRecentRects_.clear();
+    welcomeRecentDeleteRects_.clear();
     welcomeRecentPaths_.clear();
     welcomeRecentRowIndices_.clear();
     welcomeRecentView_ = DRect{};
+    welcomeClearRect_ = DRect{};
     welcomeRecentContentH_ = 0;
     float listHeaderTop = chipY + 54;
     if (!recent_.empty()) {
@@ -1384,6 +1429,10 @@ void DocView::PaintWelcome(Canvas& c) {
             welcomeRecentShown_ = std::min((int)recent_.size(), kWelcomeRecentPage);
         welcomeRecentShown_ = std::min(welcomeRecentShown_, (int)recent_.size());
         c.DrawText(L"最近打开", cx - 280, listHeaderTop, 560, 22, 12, c.palette().muted, true);
+        welcomeClearRect_ = { cx + 280 - 52, listHeaderTop - 2, 52, 22 };
+        c.DrawText(L"清空", welcomeClearRect_.x, welcomeClearRect_.y, welcomeClearRect_.w, welcomeClearRect_.h,
+                   11, c.palette().muted, false, false,
+                   DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
         float viewTop = listHeaderTop + 28;
         float viewH = std::max(80.0f, h - viewTop - 24);
         float rowW = std::min(560.0f, w - 40);
@@ -1401,12 +1450,19 @@ void DocView::PaintWelcome(Canvas& c) {
             if (hoverWelcome_ == i) c.FillRound(r.x, r.y, r.w, r.h, 6, c.palette().hover);
             const std::wstring& p = recent_[(size_t)i];
             bool exists = FileExists(p);
-            c.DrawText(PathName(p), r.x + 12, r.y + 3, r.w - 24, 19, 12.5f,
+            c.DrawText(PathName(p), r.x + 12, r.y + 3, r.w - 58, 19, 12.5f,
                        exists ? c.palette().fg : c.palette().muted, true, false,
                        DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_NEAR, false);
-            c.DrawText(PathDir(p), r.x + 12, r.y + 20, r.w - 24, 16, 10.5f, c.palette().muted, false, false,
+            c.DrawText(PathDir(p), r.x + 12, r.y + 20, r.w - 58, 16, 10.5f, c.palette().muted, false, false,
                        DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_NEAR, false);
+            DRect del{ r.x + r.w - 30, r.y + 8, 22, 22 };
+            if (hoverWelcome_ == i) {
+                c.FillRound(del.x, del.y, del.w, del.h, 4, c.palette().hover);
+                c.DrawText(L"×", del.x, del.y - 1, del.w, del.h, 14.0f, c.palette().muted, false, false,
+                           DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, false);
+            }
             welcomeRecentRects_.push_back(r);
+            welcomeRecentDeleteRects_.push_back(del);
             welcomeRecentPaths_.push_back(p);
             welcomeRecentRowIndices_.push_back(i);
         }
@@ -2414,7 +2470,21 @@ void DocView::OnMouseDown(int px, int py, bool ctrl) {
             if (events_.openFile) events_.openFile();
             return;
         }
+        if (welcomeFolderRect_.Contains(x, y)) {
+            if (events_.openFolder) events_.openFolder();
+            return;
+        }
+        if (welcomeClearRect_.Contains(x, y)) {
+            if (events_.clearRecent) events_.clearRecent();
+            return;
+        }
         for (size_t i = 0; i < welcomeRecentRects_.size(); i++) {
+            if (i < welcomeRecentPaths_.size() &&
+                i < welcomeRecentDeleteRects_.size() &&
+                welcomeRecentDeleteRects_[i].Contains(x, y)) {
+                if (events_.removeRecent) events_.removeRecent(welcomeRecentPaths_[i]);
+                return;
+            }
             if (welcomeRecentRects_[i].Contains(x, y) && i < welcomeRecentPaths_.size()) {
                 if (events_.openPath) events_.openPath(welcomeRecentPaths_[i]);
                 return;
@@ -2708,7 +2778,9 @@ void DocView::OnMouseMove(int px, int py) {
             }
         }
         if (hover != hoverWelcome_) { hoverWelcome_ = hover; InvalidateAll(); }
-        SetCursor(LoadCursorW(nullptr, welcomeOpenRect_.Contains(x, y) || hover >= 0 ? IDC_HAND : IDC_ARROW));
+        bool action = welcomeOpenRect_.Contains(x, y) || welcomeFolderRect_.Contains(x, y) ||
+                      welcomeClearRect_.Contains(x, y) || hover >= 0;
+        SetCursor(LoadCursorW(nullptr, action ? IDC_HAND : IDC_ARROW));
     } else if (m == Mode::Document && layout_) {
         int idx = HitBlock(x, y + scrollY_);
         std::wstring url;

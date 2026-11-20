@@ -169,14 +169,15 @@ struct DocTextRenderer : IDWriteTextRenderer {
         if (!canvas || !canvas->valid()) return S_OK;
         auto* eff = static_cast<const TextEffect*>(clientDrawingEffect);
         const Color& color = EffectColor(clientDrawingEffect);
-        if (eff && eff->inlineCode) {
+        if (eff && (eff->inlineCode || eff->highlight)) {
             float width = 0;
             if (glyphRun->glyphAdvances) for (UINT32 i = 0; i < glyphRun->glyphCount; i++) width += glyphRun->glyphAdvances[i];
             else width = glyphRun->fontEmSize * 0.55f * glyphRun->glyphCount;
             float top = baselineOriginY + oy - glyphRun->fontEmSize * 0.92f;
             float bottom = baselineOriginY + oy + glyphRun->fontEmSize * 0.24f;
-            canvas->FillRound(baselineOriginX + ox - 2, top, width + 4, bottom - top, 3.0f,
-                              canvas->palette().codeBg);
+            Color bg = eff->inlineCode ? canvas->palette().codeBg : HexColor(L"#F2C94C");
+            if (eff->highlight) bg.a = canvas->palette().dark ? 0.34f : 0.42f;
+            canvas->FillRound(baselineOriginX + ox - 2, top, width + 4, bottom - top, 3.0f, bg);
         }
         ComPtr<ID2D1SolidColorBrush> brush = canvas->Brush(color);
         if (brush)
@@ -252,7 +253,7 @@ bool BuildRichText(const std::vector<Inline>& inlines, const TextStyleOptions& o
     std::wstring text;
     struct Range {
         UINT32 start, len;
-        bool bold, italic, underline, strike, code, link;
+        bool bold, italic, underline, strike, code, link, highlight;
         InlineRole role;
         std::wstring url;
         std::shared_ptr<MathNode> math;
@@ -267,6 +268,7 @@ bool BuildRichText(const std::vector<Inline>& inlines, const TextStyleOptions& o
         r.strike = in.strike;
         r.code = in.code;
         r.link = in.link;
+        r.highlight = in.highlight;
         r.role = in.role;
         r.url = in.url;
         r.math = in.math;
@@ -319,6 +321,7 @@ bool BuildRichText(const std::vector<Inline>& inlines, const TextStyleOptions& o
             out.links.push_back({ (size_t)r.start, (size_t)r.len, r.url });
         }
         eff->inlineCode = r.code;
+        eff->highlight = r.highlight;
         layout->SetDrawingEffect(eff, tr);
         ComPtr<TextEffect> holder;
         holder.Attach(eff);
@@ -608,6 +611,36 @@ void Canvas::DrawLine(float x1, float y1, float x2, float y2, const Color& c, fl
     if (!target_) return;
     auto* b = Brush(c);
     if (b) target_->DrawLine(D2D1::Point2F(x1, y1), D2D1::Point2F(x2, y2), b, t);
+}
+void Canvas::DrawStrokePath(const D2D1_POINT_2F* points, size_t count, const Color& c,
+                            float thickness, bool round) {
+    if (!target_ || !points || count == 0) return;
+    auto* b = Brush(c);
+    if (!b) return;
+    if (count == 1) {
+        target_->FillEllipse(D2D1::Ellipse(points[0], thickness / 2, thickness / 2), b);
+        return;
+    }
+    ComPtr<ID2D1PathGeometry> geometry;
+    if (FAILED(Engine::Instance().D2D()->CreatePathGeometry(&geometry))) return;
+    ComPtr<ID2D1GeometrySink> sink;
+    if (FAILED(geometry->Open(&sink))) return;
+    sink->BeginFigure(points[0], D2D1_FIGURE_BEGIN_FILLED);
+    sink->AddLines(points + 1, (UINT32)(count - 1));
+    sink->EndFigure(D2D1_FIGURE_END_OPEN);
+    sink->Close();
+    ComPtr<ID2D1StrokeStyle> style;
+    if (round) {
+        D2D1_STROKE_STYLE_PROPERTIES props{};
+        props.startCap = D2D1_CAP_STYLE_ROUND;
+        props.endCap = D2D1_CAP_STYLE_ROUND;
+        props.dashCap = D2D1_CAP_STYLE_ROUND;
+        props.lineJoin = D2D1_LINE_JOIN_ROUND;
+        props.miterLimit = 1.0f;
+        props.dashStyle = D2D1_DASH_STYLE_SOLID;
+        Engine::Instance().D2D()->CreateStrokeStyle(props, nullptr, 0, &style);
+    }
+    target_->DrawGeometry(geometry.Get(), b, thickness, style.Get());
 }
 void Canvas::FillCircle(float cx, float cy, float r, const Color& c) {
     if (!target_) return;

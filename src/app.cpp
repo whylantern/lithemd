@@ -1,11 +1,17 @@
 #include "app.h"
 #include "view.h"
+#include "workspace_view.h"
+#include "archive_window.h"
 #include "render.h"
 #include "document.h"
 #include "export.h"
 #include "colorpicker.h"
 #include "i18n.h"
+#include "dialogs.h"
+#include "path_util.h"
+#include "file_watch.h"
 #include <commdlg.h>
+#include <commctrl.h>
 #include <shellapi.h>
 #include <shlobj.h>
 #include <shobjidl.h>
@@ -53,6 +59,11 @@ enum : int {
     CMD_UNGROUP_INK,
     CMD_HIGHLIGHT_PDF,
     CMD_EXPORT,
+    CMD_OPEN_FOLDER,
+    CMD_PATH,
+    CMD_WORKSPACE,
+    CMD_SPLIT,
+    CMD_PRESENT,
     CMD_ENC_AUTO = 1200,
     CMD_ENC_UTF8,
     CMD_ENC_UTF16LE,
@@ -84,6 +95,7 @@ constexpr int kHeaderH = 58;
 constexpr int kTabH = 34;
 constexpr int kStatusH = 30;
 constexpr int kOutlineW = 256;
+constexpr UINT kFileChangedMsg = WM_APP + 31;
 
 float Clampf(float v, float lo, float hi) { return v < lo ? lo : (v > hi ? hi : v); }
 
@@ -106,6 +118,11 @@ struct ShortcutCommandDef {
 const std::vector<ShortcutCommandDef>& ShortcutCommands() {
     static const std::vector<ShortcutCommandDef> defs = {
         { L"open", L"打开文件", CMD_OPEN, false, { { ShortcutCtrl, 'O' } } },
+        { L"openfolder", L"打开文件夹", CMD_OPEN_FOLDER, false, { { ShortcutCtrl | ShortcutShift, 'O' } } },
+        { L"path", L"输入路径", CMD_PATH, false, { { ShortcutCtrl, 'L' } } },
+        { L"workspace", L"工作区", CMD_WORKSPACE, false, { { ShortcutCtrl | ShortcutShift, 'E' } } },
+        { L"split", L"分屏", CMD_SPLIT, false, { { ShortcutCtrl, '\\' } } },
+        { L"present", L"演示模式", CMD_PRESENT, false, { { 0, VK_F11 } } },
         { L"reload", L"刷新", CMD_RELOAD, false, { { 0, VK_F5 }, { ShortcutCtrl, 'R' } } },
         { L"closetab", L"关闭标签", CMD_CLOSE_TAB, false, { { ShortcutCtrl, 'W' } } },
         { L"undo", L"撤销画笔", CMD_UNDO_INK, false, { { ShortcutCtrl, 'Z' } } },
@@ -206,7 +223,7 @@ bool SetRegEmpty(HKEY root, const std::wstring& sub, const std::wstring& name) {
 std::vector<std::wstring> AssociationExtensions() {
     return { L".md", L".markdown", L".mdown", L".mkd", L".mdx", L".json", L".jsonc", L".ipynb",
              L".csv", L".tsv", L".txt", L".log", L".yml", L".yaml", L".xml", L".ini", L".toml",
-             L".docx", L".doc", L".xlsx", L".xls", L".pdf" };
+             L".docx", L".doc", L".xlsx", L".xls", L".pdf", L".zip" };
 }
 
 bool DeleteRegValue(const std::wstring& sub, const std::wstring& name) {
@@ -792,7 +809,7 @@ private:
     std::set<std::wstring> selectedExts_;
     int hover_ = 0;
     float scrollY_ = 0.0f;
-    float contentHeight_ = 1640.0f;
+    float contentHeight_ = 1780.0f;
     std::wstring notice_;
 };
 
@@ -824,18 +841,18 @@ void SettingsWindow::Paint() {
     c.FillRect(24, 78, w - 48, 1, p.border);
 
     c.DrawText(L"外观", 24, 94, 120, 22, 13, p.fg, true);
-    AddBtn(40, 24, 122, 100, 36, L"蓝白", settings_->theme == L"blue");
-    AddBtn(41, 132, 122, 100, 36, L"深色", settings_->theme == L"dark");
-    AddBtn(42, 240, 122, 100, 36, L"暖纸", settings_->theme == L"warm");
-    AddBtn(43, 348, 122, 100, 36, L"护眼", settings_->theme == L"green");
+    AddBtn(40, 24, 122, 84, 36, L"蓝白", settings_->theme == L"blue");
+    AddBtn(41, 116, 122, 84, 36, L"深色", settings_->theme == L"dark");
+    AddBtn(42, 208, 122, 84, 36, L"暖纸", settings_->theme == L"warm");
+    AddBtn(43, 300, 122, 84, 36, L"护眼", settings_->theme == L"green");
 
-    c.DrawText(L"滚轮速度", 260, 94, 160, 22, 13, p.fg, true);
-    AddBtn(3, 260, 122, 38, 36, L"−");
-    AddBtn(4, 386, 122, 38, 36, L"+");
-    c.StrokeRound(302, 122, 80, 36, 6, p.border);
-    c.DrawText(std::to_wstring(settings_->wheelStep), 302, 122, 80, 36, 14, p.fg, true, false,
+    c.DrawText(L"滚轮速度", 410, 94, 160, 22, 13, p.fg, true);
+    AddBtn(3, 410, 122, 38, 36, L"−");
+    c.StrokeRound(452, 122, 80, 36, 6, p.border);
+    c.DrawText(std::to_wstring(settings_->wheelStep), 452, 122, 80, 36, 14, p.fg, true, false,
                DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-    c.DrawText(L"每格滚动 " + std::to_wstring(settings_->wheelStep) + L" 行", 438, 128, 160, 24, 11.5f, p.muted);
+    AddBtn(4, 540, 122, 38, 36, L"+");
+    c.DrawText(L"每格滚动 " + std::to_wstring(settings_->wheelStep) + L" 行", 410, 164, 170, 16, 10.5f, p.muted);
 
     c.FillRect(24, 180, w - 48, 1, p.border);
     c.DrawText(L"文件关联与默认应用", 24, 194, 300, 22, 13, p.fg, true);
@@ -964,9 +981,26 @@ void SettingsWindow::Paint() {
     AddBtn(33, 24, 1512, 116, 32, L"翻译文件夹");
     AddBtn(34, 148, 1512, 116, 32, L"重新扫描");
 
-    AddBtn(13, 24, 1580, 120, 34, L"恢复默认");
-    AddBtn(14, 152, 1580, 132, 34, L"清空本地数据");
-    AddBtn(15, w - 118, 1580, 94, 34, L"关闭", true);
+    c.FillRect(24, 1564, w - 48, 1, p.border);
+    c.DrawText(L"阅读版式", 24, 1576, 220, 22, 13, p.fg, true);
+    c.DrawText(L"字号", 24, 1606, 60, 20, 11.5f, p.muted);
+    AddBtn(50, 64, 1600, 34, 32, L"A−");
+    c.StrokeRound(104, 1600, 78, 32, 6, p.border);
+    c.DrawText(std::to_wstring((int)std::lround(settings_->fontScale * 100)) + L"%",
+               104, 1600, 78, 32, 11.5f, p.fg, true, false,
+               DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+    AddBtn(52, 188, 1600, 34, 32, L"A+");
+    c.DrawText(L"正文宽度", 238, 1606, 76, 20, 11.5f, p.muted);
+    AddBtn(53, 318, 1600, 60, 32, L"窄", false, settings_->contentWidth <= 760);
+    AddBtn(54, 384, 1600, 70, 32, L"适中", false,
+           settings_->contentWidth > 760 && settings_->contentWidth <= 940);
+    AddBtn(55, 460, 1600, 60, 32, L"宽", false,
+           settings_->contentWidth > 940 && settings_->contentWidth <= 1120);
+    AddBtn(56, 526, 1600, 70, 32, L"超宽", false, settings_->contentWidth > 1120);
+
+    AddBtn(13, 24, 1684, 120, 34, L"恢复默认");
+    AddBtn(14, 152, 1684, 132, 34, L"清空本地数据");
+    AddBtn(15, w - 118, 1684, 94, 34, L"关闭", true);
 
     for (auto& r : rects_) {
         if (r.enabled && r.id == hover_) c.FillRound(r.x, r.y, r.w, r.h, 7, p.hover);
@@ -1020,6 +1054,12 @@ void SettingsWindow::Click(int id) {
     case 41: settings_->theme = L"dark"; break;
     case 42: settings_->theme = L"warm"; break;
     case 43: settings_->theme = L"green"; break;
+    case 50: settings_->fontScale = std::max(Settings::MinFontScale, settings_->fontScale - 0.05); break;
+    case 52: settings_->fontScale = std::min(Settings::MaxFontScale, settings_->fontScale + 0.05); break;
+    case 53: settings_->contentWidth = 720; break;
+    case 54: settings_->contentWidth = 860; break;
+    case 55: settings_->contentWidth = 1040; break;
+    case 56: settings_->contentWidth = 1200; break;
     case 3: settings_->wheelStep = std::max(1, settings_->wheelStep - 1); break;
     case 4: settings_->wheelStep = std::min(10, settings_->wheelStep + 1); break;
     case 5: {
@@ -1095,6 +1135,8 @@ void SettingsWindow::Click(int id) {
         settings_->dark = false;
         settings_->wheelStep = 3;
         settings_->zoom = 1.0;
+        settings_->fontScale = 1.0;
+        settings_->contentWidth = 1040;
         settings_->inkToolsVisible = Settings::DefaultInkTools;
         settings_->inkPresets = DefaultInkPresets();
         settings_->inkToolbarPresets = { 0, 1, 2, 3, 4 };
@@ -1341,6 +1383,7 @@ class MainWindow {
 public:
     MainWindow(Settings settings, std::vector<std::wstring> initialFiles, bool openSettings)
         : settings_(std::move(settings)), initialFiles_(std::move(initialFiles)), openSettings_(openSettings) {}
+    ~MainWindow() { watcher_.Stop(); }
 
     bool Create(HINSTANCE inst) {
         inst_ = inst;
@@ -1379,9 +1422,24 @@ public:
         }
         SetDarkTitle(hwnd_, settings_.dark);
         DragAcceptFiles(hwnd_, TRUE);
+        tooltip_ = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr,
+                                   WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX,
+                                   CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT,
+                                   hwnd_, nullptr, inst, nullptr);
+        if (tooltip_) {
+            TOOLINFOW ti{};
+            ti.cbSize = sizeof(ti);
+            ti.uFlags = TTF_SUBCLASS;
+            ti.hwnd = hwnd_;
+            ti.uId = 1;
+            ti.lpszText = const_cast<wchar_t*>(L"");
+            SendMessageW(tooltip_, TTM_ADDTOOLW, 0, (LPARAM)&ti);
+            SendMessageW(tooltip_, TTM_SETMAXTIPWIDTH, 0, 900);
+        }
 
         DocView::Register(inst);
         OutlineView::Register(inst);
+        WorkspaceView::Register(inst);
 
         home_ = std::make_unique<DocView>();
         home_->SetSettings(&settings_);
@@ -1390,6 +1448,8 @@ public:
         home_->ApplyTheme(settings_.theme);
         home_->SetWheelStep(settings_.wheelStep);
         home_->SetZoom(settings_.zoom);
+        home_->SetFontScale(settings_.fontScale);
+        home_->SetContentWidth(settings_.contentWidth);
         home_->SetRecent(settings_.recent);
 
         outline_.Create(hwnd_, 101);
@@ -1398,6 +1458,24 @@ public:
             if (DocView* v = ActiveView()) v->ScrollToBlock(block);
             outline_.SetActive(block);
         });
+
+        workspace_.Create(hwnd_, 102);
+        workspace_.ApplyTheme(settings_.theme);
+        workspace_.SetCallbacks([this](const std::wstring& path) {
+            OpenFile(path, true, true);
+        }, [this] {
+            settings_.workspaceVisible = false;
+            settings_.Save();
+            LayoutChildren();
+            InvalidateChrome();
+        });
+        if (!settings_.workspaceRoot.empty() && DirExists(settings_.workspaceRoot)) {
+            std::wstring wsError;
+            if (!workspace_.OpenRoot(settings_.workspaceRoot, &wsError))
+                settings_.workspaceVisible = false;
+        } else {
+            settings_.workspaceVisible = false;
+        }
 
         LayoutChildren();
         ShowWindow(hwnd_, SW_SHOWNORMAL);
@@ -1414,6 +1492,10 @@ public:
         RebuildShortcuts();
         MSG msg{};
         while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
+            if (presentation_ && msg.message == WM_KEYDOWN && msg.wParam == VK_ESCAPE) {
+                TogglePresentation();
+                continue;
+            }
             if (HandleShortcutMessage(msg)) continue;
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
@@ -1430,6 +1512,7 @@ private:
         TextEncoding encoding = TextEncoding::Auto;
         DocLanguage language = DocLanguage::Auto;
         bool error = false;
+        bool externalChange = false;
     };
 
     struct TabHit {
@@ -1501,12 +1584,18 @@ private:
                 if (hover != hoverTab_ || close != hoverTabClose_) {
                     hoverTab_ = hover;
                     hoverTabClose_ = close;
+                    UpdateTabTooltip(hover);
                     InvalidateChrome();
                 }
                 hoverCmd_ = 0;
                 SetCursor(LoadCursorW(nullptr, (hover >= -1) ? IDC_HAND : IDC_ARROW));
             } else {
-                if (hoverTab_ != -2) { hoverTab_ = -2; hoverTabClose_ = false; InvalidateChrome(); }
+                if (hoverTab_ != -2) {
+                    hoverTab_ = -2;
+                    hoverTabClose_ = false;
+                    if (tooltip_) SendMessageW(tooltip_, TTM_POP, 0, 0);
+                    InvalidateChrome();
+                }
                 int hover = 0;
                 for (auto& b : buttons_)
                     if (b.enabled && b.rect.Contains(x, y)) { hover = b.cmd; break; }
@@ -1521,6 +1610,7 @@ private:
             hoverCmd_ = 0;
             hoverTab_ = -2;
             hoverTabClose_ = false;
+            if (tooltip_) SendMessageW(tooltip_, TTM_POP, 0, 0);
             InvalidateChrome();
             return 0;
         case WM_LBUTTONDOWN: {
@@ -1544,6 +1634,20 @@ private:
                     Command(b.cmd);
                     return 0;
                 }
+            }
+            return 0;
+        }
+        case WM_MBUTTONDOWN: {
+            float scale = GetDpiForWindow(hwnd_) / 96.0f;
+            float x = GET_X_LPARAM(lp) / scale, y = GET_Y_LPARAM(lp) / scale;
+            if (y >= kHeaderH && y < kHeaderH + kTabH) {
+                for (auto& h : tabHits_) {
+                    if (h.rect.Contains(x, y)) {
+                        if (!h.home) CloseTab(h.index);
+                        return 0;
+                    }
+                }
+                return 0;
             }
             return 0;
         }
@@ -1573,8 +1677,18 @@ private:
             if (LOWORD(wp) != WA_INACTIVE && active_ >= 0 && !loading_) {
                 Tab& t = tabs_[(size_t)active_];
                 uint64_t now = FileWriteTimeUtc(t.path);
-                if (now && t.fileTime && now != t.fileTime) Reload(true);
+                if (now && t.fileTime && now != t.fileTime) {
+                    if (t.view->HasUnsavedNotes()) {
+                        t.externalChange = true;
+                        InvalidateChrome();
+                    } else {
+                        Reload(true);
+                    }
+                }
             }
+            return 0;
+        case kFileChangedMsg:
+            OnFilesChanged();
             return 0;
         case WM_DPICHANGED: {
             RECT* r = (RECT*)lp;
@@ -1626,12 +1740,29 @@ private:
     void WireView(DocView* view, bool home) {
         DocViewEvents ev;
         ev.openFile = [this] { OpenFileDialog(); };
+        ev.openFolder = [this] { OpenFolderDialog(); };
         ev.openPath = [this](const std::wstring& p) { OpenFile(p, true, true); };
+        ev.removeRecent = [this](const std::wstring& p) {
+            settings_.RemoveRecent(p);
+            if (home_) home_->SetRecent(settings_.recent);
+            InvalidateChrome();
+        };
+        ev.clearRecent = [this] {
+            if (settings_.recent.empty()) return;
+            if (MessageBoxW(hwnd_, TranslateUi(L"清空全部最近记录？").c_str(), L"LitheMD",
+                            MB_YESNO | MB_ICONQUESTION) != IDYES) return;
+            settings_.ClearRecent();
+            if (home_) home_->SetRecent(settings_.recent);
+            InvalidateChrome();
+        };
         ev.reload = [this, view, home] {
             if (!home && view == ActiveView()) Reload(false);
         };
         ev.statusChanged = [this, view] {
-            if (view == ActiveView()) InvalidateChrome();
+            if (view == ActiveView()) {
+                if (outline_.hwnd() && view->Doc()) outline_.SetActive(view->VisibleHeadingBlock());
+                InvalidateChrome();
+            }
         };
         ev.outlineChanged = [this, view] {
             if (view == ActiveView()) { UpdateOutline(); LayoutChildren(); InvalidateChrome(); }
@@ -1729,6 +1860,11 @@ private:
         }
         switch (id) {
         case CMD_OPEN: OpenFileDialog(); break;
+        case CMD_OPEN_FOLDER: OpenFolderDialog(); break;
+        case CMD_PATH: ShowPathDialog(); break;
+        case CMD_WORKSPACE: ToggleWorkspace(); break;
+        case CMD_SPLIT: ToggleSplit(); break;
+        case CMD_PRESENT: TogglePresentation(); break;
         case CMD_RELOAD: if (!ActivePath().empty()) Reload(false); break;
         case CMD_CLOSE_TAB: CloseCurrentTab(); break;
         case CMD_PREVIEW: if (DocView* v = ActiveView()) v->SetSource(false); break;
@@ -1855,13 +1991,63 @@ private:
             if (DocView* v = ActiveView()) v->FocusView();
             return;
         }
+        bool reloadAfter = false;
+        if (index >= 0) {
+            Tab& next = tabs_[(size_t)index];
+            if (next.externalChange) {
+                if (next.view->HasUnsavedNotes() && !ConfirmSaveNotes(next.view.get())) return;
+                next.externalChange = false;
+                reloadAfter = true;
+            }
+        }
         active_ = index;
         EnsureActiveTabVisible();
         LayoutChildren();
         UpdateTitle();
         UpdateOutline();
+        workspace_.SetActivePath(ActivePath(), true);
+        StartWatching();
+        if (reloadAfter) Reload(true);
+        UpdateSplitContent();
         InvalidateChrome();
         if (DocView* v = ActiveView()) v->FocusView();
+    }
+
+    void StartWatching() {
+        std::wstring path = ActivePath();
+        if (path.empty()) {
+            watcher_.Stop();
+            return;
+        }
+        std::wstring dir = PathDir(path);
+        if (!DirExists(dir)) {
+            watcher_.Stop();
+            return;
+        }
+        watcher_.Start(hwnd_, kFileChangedMsg, dir);
+    }
+
+    void OnFilesChanged() {
+        if (loading_) return;
+        bool changed = false;
+        for (auto& tab : tabs_) {
+            if (tab.path.empty()) continue;
+            uint64_t now = FileWriteTimeUtc(tab.path);
+            if (now && tab.fileTime && now == tab.fileTime) continue;
+            if (tab.view && tab.view->HasUnsavedNotes()) {
+                tab.externalChange = true;
+                changed = true;
+                continue;
+            }
+            if (&tab == ActiveTab()) {
+                Reload(true);
+                changed = true;
+            } else {
+                tab.externalChange = true;
+                changed = true;
+            }
+        }
+        if (changed) InvalidateChrome();
     }
 
     bool ConfirmSaveNotes(DocView* view) {
@@ -1920,6 +2106,9 @@ private:
         LayoutChildren();
         UpdateTitle();
         UpdateOutline();
+        workspace_.SetActivePath(ActivePath(), false);
+        StartWatching();
+        UpdateSplitContent();
         InvalidateChrome();
         if (DocView* v = ActiveView()) v->FocusView();
     }
@@ -1940,20 +2129,39 @@ private:
         int bodyH = std::max(0, (int)rc.bottom - bodyY - status);
         int bodyW = std::max(0, (int)rc.right);
         DocView* active = ActiveView();
-        bool outline = active_ >= 0 && active && outlineWanted_ && active->CanOutline();
+        bool outline = !presentation_ && active_ >= 0 && active && outlineWanted_ && active->CanOutline();
         int outlineW = outline ? (int)std::lround(kOutlineW * scale) : 0;
-        int contentW = std::max(0, bodyW - outlineW);
+        bool workspaceShown = workspace_.hwnd() && workspace_.HasRoot() && settings_.workspaceVisible &&
+                              !presentation_;
+        int workspaceW = workspaceShown ? (int)std::lround(248 * scale) : 0;
+        int contentX = presentation_ ? 0 : workspaceW;
+        int contentW = std::max(0, bodyW - workspaceW - outlineW);
+        int contentBodyY = presentation_ ? 0 : bodyY;
+        int contentBodyH = presentation_ ? (int)rc.bottom : bodyH;
 
         if (home_) {
-            MoveWindow(home_->hwnd(), 0, bodyY, contentW, bodyH, TRUE);
+            MoveWindow(home_->hwnd(), contentX, contentBodyY, contentW, contentBodyH, TRUE);
             ShowWindow(home_->hwnd(), active_ < 0 ? SW_SHOW : SW_HIDE);
         }
         for (size_t i = 0; i < tabs_.size(); i++) {
-            MoveWindow(tabs_[i].view->hwnd(), 0, bodyY, contentW, bodyH, TRUE);
+            MoveWindow(tabs_[i].view->hwnd(), contentX, contentBodyY, contentW, contentBodyH, TRUE);
             ShowWindow(tabs_[i].view->hwnd(), (int)i == active_ ? SW_SHOW : SW_HIDE);
         }
+        if (splitView_ && split_ && !presentation_) {
+            int leftW = contentW / 2;
+            int rightW = contentW - leftW;
+            if (DocView* v = ActiveView()) MoveWindow(v->hwnd(), contentX, contentBodyY, leftW, contentBodyH, TRUE);
+            MoveWindow(splitView_->hwnd(), contentX + leftW, contentBodyY, rightW, contentBodyH, TRUE);
+            ShowWindow(splitView_->hwnd(), SW_SHOW);
+        } else if (splitView_) {
+            ShowWindow(splitView_->hwnd(), SW_HIDE);
+        }
+        if (workspace_.hwnd()) {
+            MoveWindow(workspace_.hwnd(), 0, bodyY, workspaceW, bodyH, TRUE);
+            ShowWindow(workspace_.hwnd(), workspaceShown ? SW_SHOW : SW_HIDE);
+        }
         if (outline_.hwnd()) {
-            MoveWindow(outline_.hwnd(), contentW, bodyY, outlineW, bodyH, TRUE);
+            MoveWindow(outline_.hwnd(), contentX + contentW, bodyY, outlineW, bodyH, TRUE);
             ShowWindow(outline_.hwnd(), outline ? SW_SHOW : SW_HIDE);
         }
         if (outline && active && active->Doc()) outline_.SetItems(active->Doc()->outline);
@@ -1966,6 +2174,7 @@ private:
         if (outline_.hwnd()) {
             if (show) {
                 outline_.SetItems(view->Doc() ? view->Doc()->outline : std::vector<Heading>{});
+                outline_.SetActive(view->VisibleHeadingBlock());
                 ShowWindow(outline_.hwnd(), SW_SHOW);
             } else {
                 outline_.SetItems({});
@@ -1989,9 +2198,12 @@ private:
             v->ApplyTheme(settings_.theme);
             v->SetWheelStep(settings_.wheelStep);
             v->SetZoom(settings_.zoom);
+            v->SetFontScale(settings_.fontScale);
+            v->SetContentWidth(settings_.contentWidth);
         });
         if (home_) home_->SetRecent(settings_.recent);
         outline_.ApplyTheme(settings_.theme);
+        workspace_.ApplyTheme(settings_.theme);
         SetDarkTitle(hwnd_, settings_.dark);
     }
 
@@ -2071,12 +2283,13 @@ private:
         ofn.lStructSize = sizeof(ofn);
         ofn.hwndOwner = hwnd_;
         std::wstring filter = TranslateUi(L"所有支持的文件") + L'\0' +
-            L"*.md;*.markdown;*.mdown;*.mkd;*.mdx;*.json;*.jsonc;*.ipynb;*.csv;*.tsv;*.txt;*.log;*.yml;*.yaml;*.xml;*.ini;*.toml;*.doc;*.docx;*.xls;*.xlsx;*.pdf;*.png;*.jpg;*.jpeg;*.gif;*.bmp;*.tif;*.tiff;*.ico;*.webp\0" +
+            L"*.md;*.markdown;*.mdown;*.mkd;*.mdx;*.json;*.jsonc;*.ipynb;*.csv;*.tsv;*.txt;*.log;*.yml;*.yaml;*.xml;*.ini;*.toml;*.doc;*.docx;*.xls;*.xlsx;*.pdf;*.zip;*.png;*.jpg;*.jpeg;*.gif;*.bmp;*.tif;*.tiff;*.ico;*.webp\0" +
             L"Markdown\0*.md;*.markdown;*.mdown;*.mkd;*.mdx\0" +
             TranslateUi(L"JSON / Notebook / 对话记录") + L"\0*.json;*.jsonc;*.geojson;*.webmanifest;*.ipynb\0" +
             TranslateUi(L"表格") + L"\0*.csv;*.tsv;*.xls;*.xlsx\0" +
             L"Word\0*.doc;*.docx\0" +
             L"PDF\0*.pdf\0" +
+            L"ZIP\0*.zip\0" +
             TranslateUi(L"图片") + L"\0*.png;*.jpg;*.jpeg;*.gif;*.bmp;*.tif;*.tiff;*.ico;*.webp\0" +
             TranslateUi(L"纯文本") + L"\0*.txt;*.log;*.yml;*.yaml;*.xml;*.ini;*.toml\0" +
             TranslateUi(L"所有文件") + L"\0*.*\0" + L'\0';
@@ -2087,6 +2300,138 @@ private:
         ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_EXPLORER | OFN_NOCHANGEDIR;
         ofn.lpstrTitle = dialogTitle.c_str();
         if (GetOpenFileNameW(&ofn)) OpenFile(file, true, true);
+    }
+
+    void OpenFolderDialog() {
+        std::wstring folder = PickFolder(hwnd_, TranslateUi(L"打开文件夹 - LitheMD"));
+        if (!folder.empty()) OpenWorkspace(folder, true);
+    }
+
+    void OpenWorkspace(const std::wstring& path, bool show) {
+        std::wstring error;
+        if (!workspace_.OpenRoot(path, &error)) {
+            MessageBoxW(hwnd_, TranslateUi(error.empty() ? L"无法打开该文件夹。" : error).c_str(),
+                        L"LitheMD", MB_OK | MB_ICONWARNING);
+            return;
+        }
+        settings_.workspaceRoot = workspace_.Model().Root();
+        settings_.workspaceVisible = show;
+        settings_.Save();
+        workspace_.SetActivePath(ActivePath(), false);
+        LayoutChildren();
+        InvalidateChrome();
+    }
+
+    void ToggleWorkspace() {
+        if (settings_.workspaceVisible) {
+            settings_.workspaceVisible = false;
+            settings_.Save();
+            LayoutChildren();
+            InvalidateChrome();
+            return;
+        }
+        if (!workspace_.HasRoot()) {
+            OpenFolderDialog();
+            return;
+        }
+        settings_.workspaceVisible = true;
+        settings_.Save();
+        workspace_.SetActivePath(ActivePath(), false);
+        LayoutChildren();
+        InvalidateChrome();
+    }
+
+    void ShowPathDialog() {
+        std::wstring initial = ActivePath();
+        if (initial.empty()) initial = settings_.workspaceRoot;
+        bool ok = false;
+        std::wstring input = ShowTextInput(hwnd_, TranslateUi(L"输入路径 - LitheMD"),
+                                           TranslateUi(L"输入文件、文件夹或 ZIP 路径，支持 %USERPROFILE% 和相对路径。"),
+                                           initial, false, settings_.dark, &ok);
+        if (!ok) return;
+        std::wstring base = ActivePath().empty() ? settings_.workspaceRoot : PathDir(ActivePath());
+        std::wstring path = ResolveUserPath(input, base);
+        if (path.empty()) return;
+        if (DirExists(path)) {
+            OpenWorkspace(path, true);
+        } else if (FileExists(path)) {
+            if (IsArchivePath(path)) OpenArchive(path);
+            else OpenFile(path, true, true);
+        } else {
+            MessageBoxW(hwnd_, TranslateUi(L"路径不存在或无法访问。").c_str(), L"LitheMD",
+                        MB_OK | MB_ICONWARNING);
+        }
+    }
+
+    void UpdateSplitContent() {
+        if (!split_ || !splitView_) return;
+        std::wstring path = ActivePath();
+        if (path.empty()) {
+            splitView_->ClearDocument();
+            return;
+        }
+        if (_wcsicmp(splitPath_.c_str(), path.c_str()) == 0) return;
+        std::wstring err;
+        TextEncoding encoding = TextEncoding::Auto;
+        DocLanguage language = settings_.documentLanguage;
+        std::unique_ptr<Document> doc = LoadDocument(path, err, encoding, language, false);
+        if (doc) splitView_->SetDocument(std::move(doc));
+        else splitView_->SetError(err.empty() ? L"无法打开该文件" : err, path, L"");
+        splitPath_ = path;
+    }
+
+    void ToggleSplit() {
+        if (active_ < 0 || !ActiveView() || !ActiveView()->Doc()) return;
+        split_ = !split_;
+        if (split_ && !splitView_) {
+            auto view = std::make_unique<DocView>();
+            view->SetSettings(&settings_);
+            if (!view->Create(hwnd_, 300)) {
+                split_ = false;
+                return;
+            }
+            view->ApplyTheme(settings_.theme);
+            view->SetWheelStep(settings_.wheelStep);
+            view->SetZoom(settings_.zoom);
+            view->SetFontScale(settings_.fontScale);
+            view->SetContentWidth(settings_.contentWidth);
+            WireView(view.get(), false);
+            splitView_ = std::move(view);
+        }
+        if (split_) {
+            splitPath_.clear();
+            UpdateSplitContent();
+        } else if (splitView_) {
+            splitView_->ClearDocument();
+            splitPath_.clear();
+        }
+        LayoutChildren();
+        InvalidateChrome();
+    }
+
+    void TogglePresentation() {
+        if (active_ < 0 || !ActiveView() || !ActiveView()->Doc()) return;
+        presentation_ = !presentation_;
+        if (presentation_) {
+            savedStyle_ = (DWORD)GetWindowLongPtrW(hwnd_, GWL_STYLE);
+            savedPlacement_.length = sizeof(savedPlacement_);
+            placementSaved_ = GetWindowPlacement(hwnd_, &savedPlacement_) != FALSE;
+            MONITORINFO mi{ sizeof(mi) };
+            GetMonitorInfoW(MonitorFromWindow(hwnd_, MONITOR_DEFAULTTONEAREST), &mi);
+            SetWindowLongPtrW(hwnd_, GWL_STYLE, WS_POPUP | WS_VISIBLE);
+            SetWindowPos(hwnd_, HWND_TOP, mi.rcMonitor.left, mi.rcMonitor.top,
+                         mi.rcMonitor.right - mi.rcMonitor.left, mi.rcMonitor.bottom - mi.rcMonitor.top,
+                         SWP_FRAMECHANGED | SWP_SHOWWINDOW);
+        } else {
+            SetWindowLongPtrW(hwnd_, GWL_STYLE, savedStyle_);
+            if (placementSaved_) SetWindowPlacement(hwnd_, &savedPlacement_);
+            SetWindowPos(hwnd_, nullptr, 0, 0, 0, 0,
+                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED | SWP_SHOWWINDOW);
+        }
+        SetDarkTitle(hwnd_, settings_.dark);
+        LayoutChildren();
+        InvalidateChrome();
+        if (DocView* v = ActiveView()) v->FocusView();
     }
 
     void OpenColorPicker(DocView* view, int presetIndex = -1) {
@@ -2149,6 +2494,8 @@ private:
         view->ApplyTheme(settings_.theme);
         view->SetWheelStep(settings_.wheelStep);
         view->SetZoom(settings_.zoom);
+        view->SetFontScale(settings_.fontScale);
+        view->SetContentWidth(settings_.contentWidth);
         WireView(view.get(), false);
         view->SetDocument(std::move(doc));
         Tab tab;
@@ -2161,12 +2508,26 @@ private:
         InvalidateChrome();
     }
 
+    void OpenArchive(const std::wstring& path);
+
     void OpenFile(const std::wstring& pathIn, bool addRecent, bool activate) {
         if (pathIn.empty() || loading_) return;
         std::wstring path = AbsolutePath(pathIn);
+        if (DirExists(path)) {
+            OpenWorkspace(path, true);
+            return;
+        }
+        if (IsArchivePath(path) && FileExists(path)) {
+            OpenArchive(path);
+            return;
+        }
         for (size_t i = 0; i < tabs_.size(); i++) {
             if (_wcsicmp(tabs_[i].path.c_str(), path.c_str()) == 0) {
-                if (activate) SwitchTab((int)i);
+                if (activate) {
+                    SwitchTab((int)i);
+                    uint64_t now = FileWriteTimeUtc(path);
+                    if (now && now != tabs_[i].fileTime) Reload(false);
+                }
                 return;
             }
         }
@@ -2187,6 +2548,8 @@ private:
         view->ApplyTheme(settings_.theme);
         view->SetWheelStep(settings_.wheelStep);
         view->SetZoom(settings_.zoom);
+        view->SetFontScale(settings_.fontScale);
+        view->SetContentWidth(settings_.contentWidth);
         WireView(view.get(), false);
         Tab tab;
         tab.path = path;
@@ -2210,6 +2573,7 @@ private:
         if (activate) {
             tabScroll_ = 1000000.0f;
             SwitchTab((int)tabs_.size() - 1);
+            workspace_.SetActivePath(path, true);
         } else {
             LayoutChildren();
             InvalidateChrome();
@@ -2242,10 +2606,16 @@ private:
             tab->view->SetDocument(std::move(doc), true, true);
             if (wasSource && tab->view->CanSource()) tab->view->SetSource(true);
             tab->error = false;
+            tab->externalChange = false;
         }
         loading_ = false;
+        StartWatching();
         UpdateTitle();
         UpdateOutline();
+        if (split_ && _wcsicmp(splitPath_.c_str(), tab->path.c_str()) == 0) {
+            splitPath_.clear();
+            UpdateSplitContent();
+        }
         LayoutChildren();
         InvalidateChrome();
     }
@@ -2303,6 +2673,8 @@ private:
         }
         if (view && view->HasUnsavedNotes()) s += L"  ·  笔记未保存";
         if (view && !view->NotesError().empty()) s += L"  ·  笔记文件异常";
+        if (active_ >= 0 && active_ < (int)tabs_.size() && tabs_[(size_t)active_].externalChange)
+            s += L"  ·  文件已在外部修改";
         return s;
     }
 
@@ -2376,6 +2748,8 @@ private:
         addRight(CMD_INK, 46, L"画笔", L"\uE70F", true, canInk && view && view->InkMode(), canInk, 50);
         addRight(CMD_TOC, 46, L"大纲", L"\uE8FD", true, outlineWanted_,
                  active_ >= 0 && view && view->CanOutline(), 80);
+        addRight(CMD_WORKSPACE, 50, L"文件", L"\uE8B7", true, settings_.workspaceVisible,
+                 true, 75);
         addRight(CMD_SAVE_NOTES, 50, L"保存", L"\uE74E", true, false,
                  view && view->CanSaveNotes() && view->HasUnsavedNotes(), 20);
         addRight(CMD_EXPORT, 50, L"导出", L"", false, false,
@@ -2446,6 +2820,38 @@ private:
         }
     }
 
+    void UpdateTabTooltip(int index) {
+        if (!tooltip_) return;
+        if (index < 0) {
+            SendMessageW(tooltip_, TTM_POP, 0, 0);
+            return;
+        }
+        const TabHit* hit = nullptr;
+        for (auto& h : tabHits_) {
+            if (h.index == index) { hit = &h; break; }
+        }
+        if (!hit) {
+            SendMessageW(tooltip_, TTM_POP, 0, 0);
+            return;
+        }
+        std::wstring text;
+        if (hit->home) text = L"主页";
+        else if (index >= 0 && index < (int)tabs_.size()) text = tabs_[(size_t)index].path;
+        TOOLINFOW ti{};
+        ti.cbSize = sizeof(ti);
+        ti.uFlags = TTF_SUBCLASS;
+        ti.hwnd = hwnd_;
+        ti.uId = 1;
+        ti.rect.left = (LONG)hit->rect.x;
+        ti.rect.top = (LONG)hit->rect.y;
+        ti.rect.right = (LONG)(hit->rect.x + hit->rect.w);
+        ti.rect.bottom = (LONG)(hit->rect.y + hit->rect.h);
+        ti.lpszText = text.empty() ? const_cast<wchar_t*>(L"") : &text[0];
+        SendMessageW(tooltip_, TTM_UPDATETIPTEXTW, 0, (LPARAM)&ti);
+        SendMessageW(tooltip_, TTM_NEWTOOLRECTW, 0, (LPARAM)&ti);
+        if (text.empty()) SendMessageW(tooltip_, TTM_POP, 0, 0);
+    }
+
     void DrawTabs(Canvas& c, float viewW) {
         auto& p = c.palette();
         float y = (float)kHeaderH;
@@ -2498,6 +2904,11 @@ private:
         c.SetTranslateUi(true);
         auto& p = c.palette();
         float w = c.widthDip(), h = c.heightDip();
+        if (presentation_) {
+            c.FillRect(0, 0, w, h, p.bg);
+            c.End();
+            return;
+        }
         c.FillRect(0, 0, w, kHeaderH, p.bg);
         c.FillRect(0, kHeaderH - 1, w, 1, p.border);
         c.FillRound(14, 14, 28, 28, 7, p.accent);
@@ -2505,7 +2916,6 @@ private:
                    DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
         c.DrawText(L"LitheMD", 50, 15, 70, 24, 15, p.fg, true);
         BuildButtons(w);
-
         float rightMin = w;
         for (auto& b : buttons_) if (b.rect.x > 250) rightMin = std::min(rightMin, b.rect.x);
         float titleX = 252;
@@ -2570,9 +2980,19 @@ private:
     std::vector<Tab> tabs_;
     int active_ = -1;
     OutlineView outline_;
+    WorkspaceView workspace_;
+    FileWatcher watcher_;
+    bool split_ = false;
+    std::unique_ptr<DocView> splitView_;
+    std::wstring splitPath_;
+    bool presentation_ = false;
+    DWORD savedStyle_ = 0;
+    WINDOWPLACEMENT savedPlacement_{};
+    bool placementSaved_ = false;
     SettingsWindow* settingsWin_ = nullptr;
     std::vector<HeaderBtn> buttons_;
     std::vector<TabHit> tabHits_;
+    HWND tooltip_ = nullptr;
     std::vector<ActiveShortcut> shortcuts_;
     int hoverCmd_ = 0;
     int hoverTab_ = -2;
@@ -2581,10 +3001,24 @@ private:
     float tabTotal_ = 0;
 };
 
+void MainWindow::OpenArchive(const std::wstring& path) {
+    auto* window = new ArchiveWindow(&settings_, path, [this](const std::wstring& temp,
+                                                              const std::wstring& display) {
+        OpenFile(temp, false, true);
+        if (Tab* tab = ActiveTab()) {
+            tab->title = display;
+            UpdateTitle();
+            InvalidateChrome();
+        }
+    });
+    if (!window->Create(hwnd_)) delete window;
+}
+
 } // namespace
 
 int RunApp(HINSTANCE inst, std::vector<std::wstring> initialFiles, bool openSettings) {
     Engine::Instance().Init();
+    RemoveTree(PathJoin(LocalDataDir(), L"preview"));
     Settings settings = Settings::Load();
     SetUiLanguage(settings.uiLanguage);
     MainWindow window(std::move(settings), std::move(initialFiles), openSettings);

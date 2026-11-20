@@ -31,7 +31,10 @@ struct JsonRow {
 
 struct DocViewEvents {
     std::function<void()> openFile;
+    std::function<void()> openFolder;
     std::function<void(const std::wstring&)> openPath;
+    std::function<void(const std::wstring&)> removeRecent;
+    std::function<void()> clearRecent;
     std::function<void()> reload;
     std::function<void()> statusChanged;
     std::function<void()> outlineChanged;
@@ -55,6 +58,8 @@ public:
     void SetSettings(Settings* settings);
     void ApplyTheme(const std::wstring& theme);
     void SetZoom(double zoom);
+    void SetFontScale(double scale);
+    void SetContentWidth(int width);
     void SetWheelStep(int step);
     void SetRecent(const std::vector<std::wstring>& recent);
 
@@ -75,6 +80,7 @@ public:
 
     void ScrollToBlock(int index);
     void ScrollToTop();
+    int VisibleHeadingBlock() const;
     void CopySelection();
     void ScrollBy(float dx, float dy);
     void ScrollPage(int dir);
@@ -126,6 +132,8 @@ private:
     std::wstring theme_ = L"blue";
     bool sourceMode_ = false;
     double zoom_ = 1.0;
+    double fontScale_ = 1.0;
+    int contentWidth_ = 1040;
     int wheelStep_ = 3;
     float scrollX_ = 0;
     float scrollY_ = 0;
@@ -155,7 +163,10 @@ private:
     int hoverLinkBlock_ = -1;
     std::wstring hoverLink_;
     DRect welcomeOpenRect_;
+    DRect welcomeFolderRect_;
+    DRect welcomeClearRect_;
     std::vector<DRect> welcomeRecentRects_;
+    std::vector<DRect> welcomeRecentDeleteRects_;
     std::vector<std::wstring> welcomeRecentPaths_;
     std::vector<int> welcomeRecentRowIndices_;
     DRect welcomeRecentView_;

@@ -26,6 +26,7 @@ struct Inline {
     bool strike = false;
     bool code = false;
     bool link = false;
+    bool highlight = false;
     std::wstring url;
     InlineRole role = InlineRole::Text;
     std::shared_ptr<MathNode> math;

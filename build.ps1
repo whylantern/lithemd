@@ -76,8 +76,14 @@ $common = @('-std=c++20', '-finput-charset=UTF-8') + $defs
 
 Write-Host 'compiling miniz...'
 $minizObject = Join-Path $build 'miniz.o'
-& $gcc @('-O2') @defs -c (Join-Path $root 'vendor\miniz.c') -o $minizObject 2>&1 | Out-Host
-if ($LASTEXITCODE -ne 0 -or !(Test-Path -LiteralPath $minizObject)) { throw 'miniz compile failed' }
+$minizBuilt = $false
+foreach ($opt in @(@('-O2',@()), @('-O2',@('-fno-reorder-blocks','-fno-reorder-blocks-and-partition')), @('-O1',@()), @('-O0',@()))) {
+    Remove-Item -LiteralPath $minizObject -Force -ErrorAction SilentlyContinue
+    & $gcc @($opt[0]) @($opt[1]) @defs -c (Join-Path $root 'vendor\miniz.c') -o $minizObject 2>&1 | Out-Host
+    if ($LASTEXITCODE -eq 0 -and (Test-Path -LiteralPath $minizObject)) { $minizBuilt = $true; break }
+    Write-Host ("    retrying miniz at " + $opt[0])
+}
+if (-not $minizBuilt) { throw 'miniz compile failed' }
 
 $objects = @($minizObject)
 $sources = Get-ChildItem (Join-Path $root 'src\*.cpp') | Sort-Object Name
@@ -120,7 +126,7 @@ $tmpExe = Join-Path $build 'lithemd.exe'
 $libs = @(
     '-ld2d1', '-ldwrite', '-lwindowscodecs', '-lole32', '-loleaut32', '-luuid',
     '-lshell32', '-lshlwapi', '-lcomdlg32', '-lgdi32', '-luser32', '-ldwmapi',
-    '-ladvapi32', '-lcomctl32', '-luxtheme'
+    '-ladvapi32', '-lcomctl32', '-luxtheme', '-lbcrypt'
 )
 Write-Host 'linking...'
 Remove-Item -LiteralPath $tmpExe -Force -ErrorAction SilentlyContinue
