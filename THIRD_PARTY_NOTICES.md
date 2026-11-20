@@ -24,7 +24,7 @@
 
 ## 示例文件
 
-- `samples/02_python.ipynb`、`samples/demo.md`、`samples/demo.json`、`samples/latex.md`、`samples/people.csv`、`samples/floyd.json`、`samples/ses_*.json`：随项目用于演示各格式。
+- `samples/02_python.ipynb`、`samples/demo.md`、`samples/demo.json`、`samples/latex.md`、`samples/people.csv`：随项目用于演示各格式。
 - `samples/sample.pdf`：由本项目使用 Microsoft Edge 无头打印生成。
 - `samples/sample.docx` / `sample.xlsx`：由本项目生成的最小 OOXML 示例。
 - `samples/legacy.doc` / `legacy.xls`：来自 Apache POI 测试数据（Apache License 2.0），仅用于兼容性演示。
