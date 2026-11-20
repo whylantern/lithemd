@@ -1,0 +1,2878 @@
+﻿#include "view.h"
+#include "view_internal.h"
+#include "render.h"
+#include "latex.h"
+#include "pdf.h"
+#include <algorithm>
+#include <cmath>
+#include <cwctype>
+#include <map>
+#include <functional>
+#include <shellapi.h>
+#include <commctrl.h>
+#include <windowsx.h>
+
+namespace {
+
+enum class Mode { Welcome, Document, Source, Json, Grid, Pdf, Image, Error };
+
+constexpr float kMargin = 44.0f;
+constexpr float kBaseBody = 16.0f;
+constexpr float kWheelLine = 34.0f;
+constexpr int kWelcomeRecentPage = 8;
+constexpr float kWelcomeRowH = 41.0f;
+
+std::wstring PlainInlines(const std::vector<Inline>& inlines) {
+    std::wstring out;
+    for (auto& in : inlines) {
+        if (in.math) out += MathPlainText(*in.math);
+        else out += in.text;
+    }
+    return out;
+}
+
+DWRITE_TEXT_ALIGNMENT AlignOf(int align) {
+    if (align == 1) return DWRITE_TEXT_ALIGNMENT_CENTER;
+    if (align == 2) return DWRITE_TEXT_ALIGNMENT_TRAILING;
+    return DWRITE_TEXT_ALIGNMENT_LEADING;
+}
+
+TextStyleOptions BodyOpts(float size, float width, bool bold = false, InlineRole role = InlineRole::Text) {
+    TextStyleOptions o;
+    o.fontSize = size;
+    o.bold = bold;
+    o.role = role;
+    o.maxWidth = width;
+    o.lineHeight = 1.6f;
+    o.baseline = 1.18f;
+    return o;
+}
+
+TextStyleOptions CodeOpts(float size, float width, InlineRole role = InlineRole::Text) {
+    TextStyleOptions o;
+    o.fontSize = size;
+    o.mono = true;
+    o.role = role;
+    o.maxWidth = width;
+    o.lineHeight = 1.52f;
+    o.baseline = 1.2f;
+    return o;
+}
+
+// Inline formulas can be much taller than a text line (fractions, matrices).
+// Give the line enough vertical room so DirectWrite does not clip them.
+void TuneForMath(TextStyleOptions& o, const std::vector<Inline>& inlines) {
+    IDWriteFactory* dw = Engine::Instance().DWrite();
+    float maxHeight = 0;
+    for (auto& in : inlines) {
+        if (!in.math) continue;
+        MathBox b = MeasureMath(*in.math, dw, o.fontSize * 1.05f);
+        maxHeight = std::max(maxHeight, b.height());
+    }
+    if (maxHeight > 0) {
+        float ratio = (maxHeight + o.fontSize * 0.35f) / std::max(1.0f, o.fontSize);
+        o.lineHeight = std::max(o.lineHeight, ratio);
+        o.baseline = std::min(o.baseline, o.lineHeight * 0.72f);
+    }
+}
+
+std::wstring CellString(const GridSheet& sheet, int r, int c) {
+    if (r < 0 || r >= (int)sheet.rows.size()) return L"";
+    auto& row = sheet.rows[(size_t)r];
+    if (c < 0 || c >= (int)row.size()) return L"";
+    return row[(size_t)c];
+}
+
+int MaxCols(const GridSheet& sheet) {
+    int n = sheet.maxCols;
+    for (auto& r : sheet.rows) n = std::max(n, (int)r.size());
+    return n;
+}
+
+} // namespace
+
+// ================================================================ layout
+struct DocView::Layout {
+    struct Cell {
+        RichText rt;
+        float x = 0, y = 0, w = 0, h = 0;
+        bool header = false;
+    };
+    struct Item {
+        const Block* block = nullptr;
+        float x = 0, y = 0, w = 0, h = 0;
+        float contentX = 0, contentY = 0, contentW = 0;
+        RichText main;
+        std::vector<Cell> cells;
+        std::wstring label;
+        std::wstring badge;
+        bool imageOk = false;
+        std::shared_ptr<ImageRef> image;
+        float imageX = 0, imageY = 0, imageW = 0, imageH = 0;
+        float mathX = 0, mathBaseline = 0, mathSize = 0;
+        bool quote = false;
+        bool chevron = false;
+        bool labelRight = false;
+    };
+    struct Group {
+        float x = 0, y = 0, w = 0, h = 0;
+        int role = 0;
+    };
+    std::vector<Item> items;
+    std::vector<Group> groups;
+    float height = 0;
+    float width = 0;
+};
+
+// ================================================================ DocView
+DocView::~DocView() {
+    if (inkEdit_) DestroyWindow(inkEdit_);
+    if (inkEditFont_) DeleteObject(inkEditFont_);
+    if (inkEditBrush_) DeleteObject(inkEditBrush_);
+}
+
+void DocView::Register(HINSTANCE inst) {
+    WNDCLASSEXW wc{};
+    wc.cbSize = sizeof(wc);
+    wc.style = CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS;
+    wc.lpfnWndProc = WndProc;
+    wc.hInstance = inst;
+    wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    wc.hbrBackground = nullptr;
+    wc.lpszClassName = L"OpenMdDocView";
+    RegisterClassExW(&wc);
+}
+
+bool DocView::Create(HWND parent, int id) {
+    parent_ = parent;
+    hwnd_ = CreateWindowExW(0, L"OpenMdDocView", L"", WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_HSCROLL |
+                            WS_CLIPCHILDREN | WS_TABSTOP, 0, 0, 100, 100, parent, (HMENU)(INT_PTR)id,
+                            (HINSTANCE)GetWindowLongPtrW(parent, GWLP_HINSTANCE), this);
+    return hwnd_ != nullptr;
+}
+
+void DocView::SetSettings(Settings* settings) {
+    settings_ = settings;
+    inkColors_ = InkColors();
+    if (settings) {
+        inkColors_.push_back(settings->customColors[0]);
+        inkColors_.push_back(settings->customColors[1]);
+    } else {
+        inkColors_.push_back(Color(0.545f, 0.361f, 0.965f, 1.0f));
+        inkColors_.push_back(Color(0.063f, 0.725f, 0.506f, 1.0f));
+    }
+    if (inkColor_ < 0 || inkColor_ >= (int)inkColors_.size()) inkColor_ = 0;
+    if (settings_) {
+        dark_ = settings_->dark;
+        zoom_ = settings_->zoom;
+        wheelStep_ = settings_->wheelStep;
+        recent_ = settings_->recent;
+        WelcomeResetRecentPaging();
+    }
+}
+
+void DocView::ApplyTheme(bool dark) {
+    dark_ = dark;
+    ApplyDarkWindowTheme(hwnd_, dark);
+    if (inkEditBrush_) {
+        DeleteObject(inkEditBrush_);
+        inkEditBrush_ = nullptr;
+    }
+    InvalidateAll();
+}
+
+void DocView::SetZoom(double zoom) {
+    float oldZoom = (float)zoom_;
+    zoom_ = Clampf((float)zoom, 0.6f, 2.5f);
+    if (oldZoom > 0.001f && std::abs(zoom_ - oldZoom) > 0.0005f)
+        InkScaleForZoom(zoom_ / oldZoom);
+    layoutDirty_ = true;
+    source_.wrapWidth = -1.0f;
+    source_.wrapZoom = -1.0f;
+    json_.built = false;
+    pdfState_.pages.clear();
+    pdfState_.renderedWidth.clear();
+    UpdateScrollBars();
+    InvalidateAll();
+    if (events_.statusChanged) events_.statusChanged();
+}
+
+void DocView::SetWheelStep(int step) {
+    wheelStep_ = step < 1 ? 1 : (step > 10 ? 10 : step);
+}
+
+void DocView::SetRecent(const std::vector<std::wstring>& recent) {
+    recent_ = recent;
+    WelcomeResetRecentPaging();
+    InvalidateAll();
+}
+
+void DocView::ClearDocument() {
+    doc_.reset();
+    if (canvas_) canvas_->ClearImageCache();
+    copyHover_ = CopyTarget{};
+    ClearCopyFeedback();
+    pdf_.reset();
+    errorMessage_.clear();
+    errorPath_.clear();
+    errorSource_.clear();
+    sourceMode_ = false;
+    scrollX_ = scrollY_ = 0;
+    layoutDirty_ = true;
+    pdfState_ = PdfState{};
+    grid_ = GridState{};
+    hoverGridColSep_ = hoverGridRowSep_ = -1;
+    json_ = JsonState{};
+    source_ = SourceState{};
+    if (inkEdit_) InkCancelText();
+    inkLayers_.clear();
+    inkCurrent_ = InkStroke{};
+    inkCurrentShape_ = InkShape{};
+    inkDrawing_ = inkErasing_ = inkShapeDrawing_ = false;
+    inkErasePushed_ = false;
+    inkMode_ = false;
+    inkMoreOpen_ = false;
+    inkMorePanel_ = DRect{};
+    inkTool_ = INK_TOOL_PEN;
+    inkTextAnchor_ = {};
+    inkTextSize_ = 20.0f;
+    inkButtons_.clear();
+    inkBarRect_ = DRect{};
+    inkHover_ = 0;
+    inkSelection_.clear();
+    inkDragMode_ = 0;
+    inkSelectionBarRect_ = DRect{};
+    pdfHighlights_.clear();
+    pdfTextCache_.clear();
+    pdfHighlighting_ = false;
+    pdfHighlightPage_ = -1;
+    notesDirty_ = false;
+    notesError_.clear();
+    UpdateScrollBars();
+    InvalidateAll();
+    if (events_.outlineChanged) events_.outlineChanged();
+    if (events_.statusChanged) events_.statusChanged();
+}
+
+void DocView::SetDocument(std::unique_ptr<Document> doc, bool preserveScroll, bool preserveInk) {
+    float oldFrac = -1;
+    if (preserveScroll && layout_ && layout_->height > 1) {
+        float viewH = heightDip();
+        float maxScroll = std::max(1.0f, layout_->height - viewH);
+        oldFrac = scrollY_ / maxScroll;
+    }
+    std::wstring oldPath = doc_ ? AbsolutePath(doc_->path) : L"";
+    std::wstring newPath = doc ? AbsolutePath(doc->path) : L"";
+    bool keepInk = preserveInk && !oldPath.empty() && !newPath.empty() &&
+                   _wcsicmp(oldPath.c_str(), newPath.c_str()) == 0;
+    std::map<int, InkLayer> savedLayers;
+    std::map<int, std::vector<PdfHighlight>> savedHighlights;
+    bool savedDirty = false;
+    if (keepInk) {
+        savedLayers = std::move(inkLayers_);
+        savedHighlights = std::move(pdfHighlights_);
+        savedDirty = notesDirty_;
+    }
+    doc_ = std::move(doc);
+    if (canvas_) canvas_->ClearImageCache();
+    pdf_.reset();
+    errorMessage_.clear();
+    errorPath_.clear();
+    errorSource_.clear();
+    scrollX_ = scrollY_ = 0;
+    sourceMode_ = false;
+    layout_.reset();
+    layoutDirty_ = true;
+    source_.built = false;
+    source_.lines.clear();
+    json_.built = false;
+    json_.rows.clear();
+    json_.collapsed.clear();
+    pdfState_ = PdfState{};
+    grid_ = GridState{};
+    hoverGridColSep_ = hoverGridRowSep_ = -1;
+    selectedRow_ = selectedCol_ = -1;
+    hoverJsonRow_ = -1;
+    hoverLinkBlock_ = -1;
+    hoverLink_.clear();
+    copyHover_ = CopyTarget{};
+    ClearCopyFeedback();
+    if (inkEdit_) InkCancelText();
+    inkLayers_.clear();
+    inkCurrent_ = InkStroke{};
+    inkCurrentShape_ = InkShape{};
+    inkDrawing_ = inkErasing_ = inkShapeDrawing_ = false;
+    inkErasePushed_ = false;
+    inkMode_ = false;
+    inkMoreOpen_ = false;
+    inkMorePanel_ = DRect{};
+    inkTool_ = INK_TOOL_PEN;
+    inkTextAnchor_ = {};
+    inkTextSize_ = 20.0f;
+    inkButtons_.clear();
+    inkBarRect_ = DRect{};
+    inkHover_ = 0;
+    inkSelection_.clear();
+    inkDragMode_ = 0;
+    inkSelectionBarRect_ = DRect{};
+    pdfHighlights_.clear();
+    pdfTextCache_.clear();
+    pdfHighlighting_ = false;
+    pdfHighlightPage_ = -1;
+    pdfHighlightPageRect_ = DRect{};
+    pdfHighlightDragRect_ = DRect{};
+    notesDirty_ = false;
+    notesError_.clear();
+
+    if (!doc_) { ClearDocument(); return; }
+    if (doc_->sourceDefault && doc_->sourceAllowed) sourceMode_ = true;
+    if (doc_->kind == DocKind::Pdf) {
+        pdf_ = std::make_shared<PdfDocument>();
+        std::wstring err;
+        if (!pdf_->Load(doc_->path, err)) {
+            errorMessage_ = err.empty() ? L"无法打开 PDF 文件" : err;
+            errorPath_ = doc_->path;
+            pdfState_.error = errorMessage_;
+            pdfState_.loaded = true;
+        } else {
+            doc_->pdfPages = pdf_->PageCount();
+            pdfState_.loaded = true;
+        }
+    }
+    if (doc_->kind == DocKind::Csv || doc_->kind == DocKind::Xlsx || doc_->kind == DocKind::Xls)
+        RebuildGridWidths();
+    if (doc_->kind == DocKind::Image && doc_->image && doc_->imageW <= 0) {
+        float iw = 0, ih = 0;
+        if (ImagePixelSize(*doc_->image, iw, ih)) {
+            doc_->imageW = (int)iw;
+            doc_->imageH = (int)ih;
+        }
+    }
+    if (keepInk) {
+        inkLayers_ = std::move(savedLayers);
+        pdfHighlights_ = std::move(savedHighlights);
+        notesDirty_ = savedDirty;
+    } else {
+        std::wstring noteError;
+        LoadNotes(&noteError);
+    }
+    pendingScrollFrac_ = oldFrac;
+    UpdateScrollBars();
+    InvalidateAll();
+    if (events_.sourceModeChanged) events_.sourceModeChanged();
+    if (events_.outlineChanged) events_.outlineChanged();
+    if (events_.statusChanged) events_.statusChanged();
+}
+
+void DocView::SetError(const std::wstring& message, const std::wstring& path, const std::wstring& sourceText) {
+    doc_.reset();
+    if (canvas_) canvas_->ClearImageCache();
+    pdf_.reset();
+    errorMessage_ = message;
+    errorPath_ = path;
+    errorSource_ = sourceText;
+    sourceMode_ = false;
+    layoutDirty_ = true;
+    scrollX_ = scrollY_ = 0;
+    if (inkEdit_) InkCancelText();
+    inkLayers_.clear();
+    inkCurrent_ = InkStroke{};
+    inkCurrentShape_ = InkShape{};
+    inkDrawing_ = inkErasing_ = inkShapeDrawing_ = false;
+    inkErasePushed_ = false;
+    inkMode_ = false;
+    inkMoreOpen_ = false;
+    inkMorePanel_ = DRect{};
+    inkTool_ = INK_TOOL_PEN;
+    inkTextAnchor_ = {};
+    inkTextSize_ = 20.0f;
+    inkButtons_.clear();
+    inkBarRect_ = DRect{};
+    inkHover_ = 0;
+    inkSelection_.clear();
+    inkDragMode_ = 0;
+    inkSelectionBarRect_ = DRect{};
+    pdfHighlights_.clear();
+    pdfTextCache_.clear();
+    pdfHighlighting_ = false;
+    pdfHighlightPage_ = -1;
+    notesDirty_ = false;
+    notesError_.clear();
+    UpdateScrollBars();
+    InvalidateAll();
+    if (events_.outlineChanged) events_.outlineChanged();
+    if (events_.statusChanged) events_.statusChanged();
+}
+
+bool DocView::CanSource() const {
+    return doc_ && doc_->sourceAllowed && !doc_->text.empty();
+}
+
+bool DocView::CanOutline() const {
+    return doc_ && !sourceMode_ && !doc_->outline.empty() &&
+           (doc_->kind == DocKind::Markdown || doc_->kind == DocKind::Notebook ||
+            doc_->kind == DocKind::Chat || doc_->kind == DocKind::Docx || doc_->kind == DocKind::Doc);
+}
+
+void DocView::SetSource(bool source) {
+    if (!doc_ || !CanSource() || sourceMode_ == source) return;
+    if (inkEdit_) InkCommitText();
+    if (inkDrawing_ || inkErasing_ || inkShapeDrawing_) InkEnd();
+    inkHover_ = 0;
+    inkButtons_.clear();
+    inkSelection_.clear();
+    inkDragMode_ = 0;
+    sourceMode_ = source;
+    if (source) BuildSource();
+    scrollX_ = scrollY_ = 0;
+    layoutDirty_ = true;
+    UpdateScrollBars();
+    InvalidateAll();
+    if (events_.sourceModeChanged) events_.sourceModeChanged();
+    if (events_.outlineChanged) events_.outlineChanged();
+    if (events_.statusChanged) events_.statusChanged();
+}
+
+void DocView::RebuildGridWidths() {
+    if (!doc_) return;
+    int oldSheet = grid_.sheet;
+    grid_ = GridState{};
+    grid_.colWidths.resize(doc_->grid.sheets.size());
+    grid_.rowHeights.resize(doc_->grid.sheets.size());
+    for (size_t s = 0; s < doc_->grid.sheets.size(); s++) {
+        auto& sheet = doc_->grid.sheets[s];
+        int cols = MaxCols(sheet);
+        grid_.colWidths[s].assign((size_t)cols, 84.0f);
+        for (int c = 0; c < cols; c++) {
+            size_t maxLen = 4;
+            int sample = std::min<int>((int)sheet.rows.size(), 120);
+            for (int r = 0; r < sample; r++)
+                maxLen = std::max(maxLen, std::min<size_t>(CellString(sheet, r, c).size(), 80));
+            float w = 22.0f + maxLen * 7.4f;
+            grid_.colWidths[s][(size_t)c] = Clampf(w, 66.0f, 380.0f);
+        }
+        grid_.rowHeights[s].assign(sheet.rows.size(), 27.0f);
+        for (size_t r = 0; r < sheet.rows.size() && r < 300; r++) {
+            int lines = 1;
+            for (auto& cell : sheet.rows[r]) {
+                int n = 1;
+                for (wchar_t ch : cell) if (ch == L'\n') n++;
+                lines = std::max(lines, n);
+            }
+            if (lines > 1) grid_.rowHeights[s][r] = std::min(90.0f, 27.0f * lines);
+        }
+    }
+    grid_.sheet = std::min(oldSheet, (int)doc_->grid.sheets.size() - 1);
+    if (grid_.sheet < 0) grid_.sheet = 0;
+}
+
+float DocView::PageWidth() const {
+    RECT rc{};
+    GetClientRect(hwnd_, &rc);
+    float scale = GetDpiForWindow(hwnd_) / 96.0f;
+    return (rc.right - rc.left) / scale;
+}
+
+float DocView::heightDip() const {
+    RECT rc{};
+    GetClientRect(hwnd_, &rc);
+    float scale = GetDpiForWindow(hwnd_) / 96.0f;
+    return (rc.bottom - rc.top) / scale;
+}
+
+void DocView::ImageDisplaySize(float viewW, float viewH, float& outW, float& outH) const {
+    outW = outH = 0;
+    if (!doc_ || !doc_->image || doc_->imageW <= 0 || doc_->imageH <= 0) return;
+    float iw = (float)doc_->imageW, ih = (float)doc_->imageH;
+    float fit = std::min((viewW - 80.0f) / iw, (viewH - 80.0f) / ih);
+    if (fit > 1.0f) fit = 1.0f;
+    if (fit < 0.02f) fit = 0.02f;
+    outW = iw * fit * (float)zoom_;
+    outH = ih * fit * (float)zoom_;
+}
+
+bool DocView::ImageDisplayRect(float& x, float& y, float& w, float& h) const {
+    float viewW = PageWidth(), viewH = heightDip();
+    ImageDisplaySize(viewW, viewH, w, h);
+    if (w <= 0 || h <= 0) return false;
+    x = (viewW - w) / 2;
+    y = (viewH - h) / 2;
+    if (w > viewW - 64) x = 32 - scrollX_;
+    if (h > viewH - 64) y = 32 - scrollY_;
+    return true;
+}
+
+void DocView::BuildSource() {
+    if (source_.built || !doc_) return;
+    source_.lines = SplitLines(doc_->text);
+    if (source_.lines.size() > 200000) {
+        source_.lines.resize(200000);
+        source_.lines.push_back(L"…（源码过长，已截断显示）");
+    }
+    source_.rows.clear();
+    source_.rowLines.clear();
+    source_.wrapWidth = -1.0f;
+    source_.wrapZoom = -1.0f;
+    source_.built = true;
+}
+
+void DocView::BuildSourceRows(float width) {
+    if (!source_.built) return;
+    if (std::abs(source_.wrapWidth - width) < 0.5f &&
+        std::abs(source_.wrapZoom - (float)zoom_) < 0.001f)
+        return;
+    source_.wrapWidth = width;
+    source_.wrapZoom = (float)zoom_;
+    source_.rows.clear();
+    source_.rowLines.clear();
+    source_.rows.reserve(source_.lines.size());
+    source_.rowLines.reserve(source_.lines.size());
+    float font = 13.0f * (float)zoom_;
+    float cell = std::max(1.0f, font * 0.62f);
+    int cells = std::max(16, (int)std::floor(std::max(1.0f, width - 12.0f) / cell));
+    size_t maxRows = 500000;
+    for (size_t li = 0; li < source_.lines.size(); li++) {
+        std::wstring line;
+        line.reserve(source_.lines[li].size());
+        for (wchar_t ch : source_.lines[li]) {
+            if (ch == L'\t') line += L"    ";
+            else if (ch != L'\r') line += ch;
+        }
+        if (line.empty()) {
+            source_.rows.push_back(L"");
+            source_.rowLines.push_back((int)li);
+            if (source_.rows.size() >= maxRows) break;
+            continue;
+        }
+        size_t pos = 0;
+        while (pos < line.size()) {
+            size_t start = pos;
+            float used = 0;
+            size_t lastBreak = std::wstring::npos;
+            while (pos < line.size()) {
+                wchar_t ch = line[pos];
+                if (ch == L' ' || ch == L'\t' || ch == L',' || ch == L';' ||
+                    ch == L'(' || ch == L')' || ch == L'{' || ch == L'}')
+                    lastBreak = pos + 1;
+                float cw = ch > 0x7F ? 2.0f : 1.0f;
+                if (used + cw > (float)cells && pos > start) break;
+                used += cw;
+                pos++;
+            }
+            if (pos < line.size() && lastBreak != std::wstring::npos &&
+                lastBreak > start + (size_t)cells / 3) {
+                pos = lastBreak;
+            }
+            if (pos <= start) pos = start + 1;
+            source_.rows.push_back(line.substr(start, pos - start));
+            source_.rowLines.push_back((int)li);
+            if (source_.rows.size() >= maxRows) break;
+        }
+        if (source_.rows.size() >= maxRows) break;
+    }
+    if (source_.rows.empty()) {
+        source_.rows.push_back(L"");
+        source_.rowLines.push_back(0);
+    }
+}
+
+void DocView::BuildJson() {
+    if (json_.built || !doc_) return;
+    json_.rows.clear();
+    if (doc_->kind != DocKind::Json) { json_.built = true; return; }
+    if (json_.collapsed.empty() && doc_->jsonNodes > 900 && doc_->jsonNodes <= 30000) {
+        std::function<void(const JNode&, int)> collapseDeep = [&](const JNode& n, int depth) {
+            if (n.kind == JKind::Object || n.kind == JKind::Array) {
+                if (depth >= 2) json_.collapsed.insert(&n);
+                for (auto& m : n.members) collapseDeep(m.second, depth + 1);
+                for (auto& i : n.items) collapseDeep(i, depth + 1);
+            }
+        };
+        collapseDeep(doc_->json, 0);
+    }
+    size_t maxChars = 20;
+    std::function<void(const JNode&, const std::wstring&, int, bool)> add =
+        [&](const JNode& n, const std::wstring& key, int depth, bool comma) {
+            JsonRow row;
+            row.node = &n;
+            row.key = key;
+            row.depth = depth;
+            row.hasComma = comma;
+            row.container = (n.kind == JKind::Object || n.kind == JKind::Array);
+            row.expanded = row.container && !json_.collapsed.count(&n);
+            if (n.kind == JKind::Object) { row.valueType = 4; row.value = L"{"; }
+            else if (n.kind == JKind::Array) { row.valueType = 5; row.value = L"["; }
+            else if (n.kind == JKind::String) { row.valueType = 3; row.value = JsonEscape(n.str); }
+            else if (n.kind == JKind::Number) { row.valueType = 2; row.value = n.raw; }
+            else if (n.kind == JKind::Bool) { row.valueType = 1; row.value = n.boolean ? L"true" : L"false"; }
+            else { row.valueType = 0; row.value = L"null"; }
+            json_.rows.push_back(row);
+            maxChars = std::max(maxChars, key.size() + row.value.size() + (size_t)depth * 3 + 4);
+            if (row.container && row.expanded) {
+                if (n.kind == JKind::Object) {
+                    for (size_t i = 0; i < n.members.size(); i++)
+                        add(n.members[i].second, n.members[i].first, depth + 1, i + 1 < n.members.size());
+                } else {
+                    for (size_t i = 0; i < n.items.size(); i++)
+                        add(n.items[i], L"[" + std::to_wstring(i) + L"]", depth + 1, i + 1 < n.items.size());
+                }
+                JsonRow close;
+                close.node = &n;
+                close.depth = depth;
+                close.closing = true;
+                close.valueType = (n.kind == JKind::Object) ? 4 : 5;
+                close.hasComma = comma;
+                json_.rows.push_back(close);
+            }
+        };
+    add(doc_->json, L"", 0, false);
+    json_.contentWidth = 60.0f + std::min<size_t>(maxChars, 2000) * 13.0f * 0.62f * (float)zoom_;
+    json_.built = true;
+}
+
+void DocView::RelayoutIfNeeded() {
+    if (!doc_ || rebuilding_) return;
+    float viewW = PageWidth();
+    if (!layoutDirty_ && layout_ && std::abs(lastWidth_ - viewW) < 0.5f) return;
+    rebuilding_ = true;
+    lastWidth_ = viewW;
+    layoutDirty_ = false;
+    auto lay = std::make_shared<Layout>();
+    float contentW = std::min(viewW - 2 * kMargin, 1040.0f);
+    if (contentW < 220) contentW = std::max(120.0f, viewW - 24.0f);
+    float left = (viewW - contentW) / 2;
+    if (left < 16) left = 16;
+    float z = (float)zoom_;
+    float y = 26.0f * z;
+    float bottomPad = 40.0f * z;
+    int previousChatGroup = -1;
+    bool previousWasHeading = false;
+
+    for (size_t i = 0; i < doc_->blocks.size(); i++) {
+        Block& b = doc_->blocks[i];
+        Layout::Item it;
+        it.block = &b;
+        float x = left, w = contentW;
+        if (b.chatRole == 1) {
+            w = contentW * 0.76f;
+            x = left + contentW - w;
+        }
+        it.x = x;
+        it.w = w;
+        it.quote = b.quote;
+        bool isChat = b.chatRole != 0;
+        // Chat spacing belongs before the first block of a group, not after
+        // it. Otherwise a new message header starts with only the intra-group
+        // gap and its card background can collide with the previous card.
+        if (i > 0) {
+            if (isChat && b.group != previousChatGroup) {
+                y += (previousChatGroup < 0 ? 10.0f : 24.0f) * z;
+            } else if (previousWasHeading) {
+                y += 2.0f * z;
+            } else if (isChat) {
+                y += 8.0f * z;
+            } else {
+                y += 10.0f * z;
+            }
+        }
+        switch (b.kind) {
+        case BlockKind::Heading: {
+            float size = (b.level <= 1 ? 30.0f : b.level == 2 ? 24.0f : b.level == 3 ? 20.0f :
+                          b.level == 4 ? 18.0f : 16.0f) * z;
+            y += (b.level <= 1 ? 26.0f : 18.0f) * z;
+            TextStyleOptions o = BodyOpts(size, w, true);
+            o.lineHeight = 1.3f;
+            o.baseline = 1.05f;
+            o.align = AlignOf(b.align);
+            TuneForMath(o, b.inlines);
+            BuildRichText(b.inlines, o, it.main);
+            it.contentX = x;
+            it.contentY = y;
+            it.h = it.main.height + 8 * z;
+        } break;
+        case BlockKind::Paragraph:
+        case BlockKind::Quote: {
+            float indent = b.quote ? 16.0f * z : 0.0f;
+            TextStyleOptions o = BodyOpts(kBaseBody * z, w - indent);
+            o.align = AlignOf(b.align);
+            TuneForMath(o, b.inlines);
+            BuildRichText(b.inlines, o, it.main);
+            it.contentX = x + indent;
+            it.contentY = y + (b.quote ? 10 * z : 0);
+            it.h = it.main.height + (b.quote ? 20 * z : 0);
+        } break;
+        case BlockKind::ListItem: {
+            float indent = std::min(6, b.indent) * 22.0f * z;
+            float markerW = 24.0f * z + (b.task ? 6.0f * z : 0);
+            TextStyleOptions o = BodyOpts(kBaseBody * z, w - indent - markerW);
+            TuneForMath(o, b.inlines);
+            BuildRichText(b.inlines, o, it.main);
+            it.contentX = x + indent + markerW;
+            it.contentY = y;
+            it.h = std::max(it.main.height, 22.0f * z) + 3 * z;
+        } break;
+        case BlockKind::Code:
+        case BlockKind::OutputText: {
+            bool out = b.kind == BlockKind::OutputText;
+            float pad = (out ? 12.0f : 15.0f) * z;
+            float labelH = 0;
+            if (out) {
+                it.label = b.label.empty() ? (b.error ? L"错误" : L"输出") : b.label;
+                labelH = 18 * z;
+            } else if (!b.badge.empty() || !b.lang.empty()) {
+                it.label = b.badge.empty() ? b.lang : b.badge;
+                labelH = 20 * z;
+            }
+            float innerW = w - pad * 2;
+            TextStyleOptions o = CodeOpts((out ? 13.0f : 13.5f) * z, innerW,
+                                          b.error ? InlineRole::Danger : InlineRole::Text);
+            const std::vector<Inline>* inlines = &b.inlines;
+            std::vector<Inline> fallback;
+            if (inlines->empty()) {
+                Inline in;
+                in.text = b.text;
+                fallback.push_back(in);
+                inlines = &fallback;
+            }
+            BuildRichText(*inlines, o, it.main);
+            it.contentX = x + pad;
+            it.contentY = y + pad + labelH;
+            it.h = it.main.height + pad * 2 + labelH;
+        } break;
+        case BlockKind::Math: {
+            float fs = 22.0f * z;
+            if (b.math) {
+                MathBox box = MeasureMath(*b.math, Engine::Instance().DWrite(), fs);
+                it.mathSize = fs;
+                it.mathBaseline = y + 10 * z + box.ascent;
+                it.mathX = x + (w - box.width) / 2;
+                it.h = box.height() + 24 * z;
+                it.contentX = x;
+                it.contentY = y;
+            } else {
+                it.h = 10 * z;
+            }
+            if (!b.label.empty()) it.label = b.label;
+        } break;
+        case BlockKind::Table: {
+            int cols = (int)b.table.aligns.size();
+            for (auto& row : b.table.rows) cols = std::max(cols, (int)row.size());
+            if (cols > 0) {
+                std::vector<float> pref((size_t)cols, 70.0f * z);
+                for (int c = 0; c < cols; c++) {
+                    size_t maxLen = 3;
+                    for (auto& row : b.table.rows) {
+                        if (c < (int)row.size())
+                            maxLen = std::max(maxLen, std::min<size_t>(PlainInlines(row[(size_t)c].inlines).size(), 80));
+                    }
+                    pref[(size_t)c] = Clampf(24.0f * z + maxLen * 7.8f * z, 56.0f * z, 420.0f * z);
+                }
+                float total = 0;
+                for (float p : pref) total += p;
+                float avail = w - 2 * z;
+                if (total > avail) {
+                    float scale = avail / total;
+                    for (auto& p : pref) p = std::max(46.0f * z, p * scale);
+                    total = 0;
+                    for (float p : pref) total += p;
+                    if (total > avail) {
+                        float extra = (total - avail) / cols;
+                        for (auto& p : pref) p = std::max(36.0f * z, p - extra);
+                    }
+                } else if (total < avail) {
+                    float extra = (avail - total) / std::max(1, cols);
+                    for (auto& p : pref) p += extra;
+                }
+                float tableTop = y;
+                float rowHeightTotal = 0;
+                for (auto& row : b.table.rows) {
+                    float rowH = 30.0f * z;
+                    std::vector<Layout::Cell> cells;
+                    float cx = x;
+                    for (int c = 0; c < cols; c++) {
+                        Layout::Cell cell;
+                        cell.x = cx;
+                        cell.y = tableTop + rowHeightTotal;
+                        cell.w = pref[(size_t)c];
+                        cell.header = row.empty() ? false : row[0].header;
+                        if (c < (int)row.size()) {
+                            bool hdr = row[(size_t)c].header || cell.header;
+                            TextStyleOptions o = BodyOpts(14.0f * z, cell.w - 16 * z, hdr);
+                            o.lineHeight = 1.45f;
+                            o.baseline = 1.2f;
+                            int align = c < (int)b.table.aligns.size() ? b.table.aligns[(size_t)c] : row[(size_t)c].align;
+                            o.align = AlignOf(align);
+                            TuneForMath(o, row[(size_t)c].inlines);
+                            BuildRichText(row[(size_t)c].inlines, o, cell.rt);
+                        }
+                        rowH = std::max(rowH, cell.rt.height + 14 * z);
+                        cx += cell.w;
+                        cells.push_back(std::move(cell));
+                    }
+                    for (auto& cell : cells) cell.h = rowH;
+                    for (auto& cell : cells) it.cells.push_back(std::move(cell));
+                    rowHeightTotal += rowH;
+                }
+                it.h = rowHeightTotal + 12 * z;
+                it.contentX = x;
+                it.contentY = tableTop;
+            }
+        } break;
+        case BlockKind::Image:
+        case BlockKind::OutputImage: {
+            float labelH = b.kind == BlockKind::OutputImage ? 22 * z : 0;
+            it.label = b.kind == BlockKind::OutputImage ? (b.label.empty() ? L"输出图片" : b.label) : L"";
+            float iw = 0, ih = 0;
+            if (b.image && ImagePixelSize(*b.image, iw, ih) && iw > 1 && ih > 1) {
+                float maxW = w - (b.kind == BlockKind::OutputImage ? 28 * z : 0);
+                float maxH = 900.0f * z;
+                float scale = std::min(maxW / iw, maxH / ih);
+                if (scale > 1.0f) scale = 1.0f;
+                it.imageW = iw * scale;
+                it.imageH = ih * scale;
+                it.image = b.image;
+                it.imageOk = true;
+                it.imageX = x + (w - it.imageW) / 2;
+                it.imageY = y + labelH;
+                it.h = it.imageH + labelH + 14 * z;
+            } else {
+                it.image = b.image;
+                it.imageOk = false;
+                it.h = (b.kind == BlockKind::OutputImage ? 58.0f : 44.0f) * z + labelH;
+                it.contentX = x;
+                it.contentY = y + labelH;
+            }
+        } break;
+        case BlockKind::Hr:
+            it.h = 26.0f * z;
+            break;
+        case BlockKind::Session: {
+            float pad = 18.0f * z;
+            float labelH = 18.0f * z;
+            TextStyleOptions o = BodyOpts(23.0f * z, w - pad * 2, true);
+            o.lineHeight = 1.25f;
+            o.baseline = 1.0f;
+            BuildPlainRichText(b.text.empty() ? L"openmd" : b.text, o, it.main);
+            it.label = b.label.empty() ? L"会话" : b.label;
+            it.badge = b.badge;
+            it.contentX = x + pad;
+            it.contentY = y + pad + labelH;
+            float badgeH = b.badge.empty() ? 0 : 20.0f * z;
+            it.h = pad * 2 + labelH + it.main.height + badgeH + 8 * z;
+        } break;
+        case BlockKind::ChatHeader: {
+            it.label = b.label;
+            it.badge = b.badge;
+            it.h = 25.0f * z;
+            it.labelRight = b.chatRole == 1;
+            if (it.labelRight) {
+                if (!it.badge.empty()) it.label += L"  ·  " + it.badge;
+                it.badge.clear();
+            }
+            it.contentX = x;
+            it.contentY = y;
+        } break;
+        case BlockKind::Reasoning:
+        case BlockKind::Tool: {
+            float pad = 10.0f * z;
+            float headerH = 25.0f * z;
+            it.label = b.summary.empty() ? b.label : b.summary;
+            it.chevron = b.collapsible;
+            it.contentX = x + pad + (b.collapsible ? 16 * z : 0);
+            it.contentY = y + pad + headerH;
+            if (b.expanded && !b.text.empty()) {
+                TextStyleOptions o = (b.kind == BlockKind::Tool ? CodeOpts(12.5f * z, w - pad * 2 - 16 * z)
+                                                                : BodyOpts(13.5f * z, w - pad * 2 - 16 * z));
+                o.lineHeight = 1.5f;
+                BuildPlainRichText(b.text, o, it.main);
+                it.h = pad * 2 + headerH + it.main.height + 6 * z;
+            } else {
+                it.h = pad * 2 + headerH;
+            }
+        } break;
+        case BlockKind::Banner: {
+            float pad = 14.0f * z;
+            TextStyleOptions o = BodyOpts(15.0f * z, w - pad * 2);
+            BuildPlainRichText(b.text, o, it.main);
+            it.label = b.label;
+            it.badge = b.badge;
+            it.contentX = x + pad;
+            it.contentY = y + pad + (b.label.empty() ? 0 : 18 * z);
+            it.h = pad * 2 + it.main.height + (b.label.empty() ? 0 : 18 * z);
+        } break;
+        default:
+            it.h = 0;
+            break;
+        }
+        it.y = y;
+        y += it.h;
+        if (isChat) previousChatGroup = b.group;
+        previousWasHeading = b.kind == BlockKind::Heading;
+        lay->items.push_back(std::move(it));
+    }
+
+    std::map<int, Layout::Group> groups;
+    for (auto& it : lay->items) {
+        if (it.block->group < 0 || it.block->chatRole == 0) continue;
+        auto& g = groups[it.block->group];
+        if (g.w <= 0) {
+            g.x = it.x;
+            g.y = it.y;
+            g.w = it.w;
+            g.h = it.h;
+            g.role = it.block->chatRole;
+        } else {
+            float x2 = std::max(g.x + g.w, it.x + it.w);
+            g.x = std::min(g.x, it.x);
+            g.w = x2 - g.x;
+            g.h = std::max(g.h, it.y + it.h - g.y);
+        }
+    }
+    for (auto& kv : groups) {
+        auto& g = kv.second;
+        g.x -= 10 * z;
+        g.y -= 6 * z;
+        g.w += 20 * z;
+        g.h += 12 * z;
+        lay->groups.push_back(g);
+    }
+    lay->height = y + bottomPad + 10.0f * z;
+    lay->width = viewW;
+    layout_ = std::move(lay);
+    if (pendingScrollFrac_ >= 0) {
+        float viewH = heightDip();
+        float maxScroll = std::max(0.0f, layout_->height - viewH);
+        scrollY_ = pendingScrollFrac_ * maxScroll;
+        pendingScrollFrac_ = -1;
+    }
+    rebuilding_ = false;
+    UpdateScrollBars();
+}
+
+void DocView::RefreshLayout() {
+    layoutDirty_ = true;
+    RelayoutIfNeeded();
+    UpdateScrollBars();
+    InvalidateAll();
+}
+
+void DocView::UpdateScrollBars() {
+    if (!hwnd_ || updatingScrollbars_) return;
+    updatingScrollbars_ = true;
+    RECT rc{};
+    GetClientRect(hwnd_, &rc);
+    float scale = GetDpiForWindow(hwnd_) / 96.0f;
+    float viewW = (rc.right - rc.left) / scale;
+    float viewH = (rc.bottom - rc.top) / scale;
+    if (viewW < 1) viewW = 1;
+    if (viewH < 1) viewH = 1;
+    Mode m = Mode::Welcome;
+    if (!errorMessage_.empty()) m = Mode::Error;
+    else if (!doc_) m = Mode::Welcome;
+    else if (sourceMode_) m = Mode::Source;
+    else if (doc_->kind == DocKind::Json) m = Mode::Json;
+    else if (doc_->kind == DocKind::Csv || doc_->kind == DocKind::Xlsx || doc_->kind == DocKind::Xls) m = Mode::Grid;
+    else if (doc_->kind == DocKind::Pdf) m = Mode::Pdf;
+    else if (doc_->kind == DocKind::Image) m = Mode::Image;
+    else m = Mode::Document;
+
+    float totalH = viewH, totalW = viewW;
+    if (m == Mode::Document) {
+        if (layoutDirty_ || !layout_) RelayoutIfNeeded();
+        if (layout_) {
+            totalH = layout_->height;
+            totalW = layout_->width;
+        }
+    } else if (m == Mode::Source) {
+        if (!source_.built) BuildSource();
+        float lineH = 19.0f * (float)zoom_;
+        float gutter = 60.0f * (float)zoom_;
+        BuildSourceRows(std::max(32.0f, viewW - gutter - 24.0f));
+        totalH = 16 + source_.rows.size() * lineH + 30;
+        totalW = viewW;
+    } else if (m == Mode::Json) {
+        if (!json_.built) BuildJson();
+        float rowH = 24.0f * (float)zoom_;
+        totalH = 24 + json_.rows.size() * rowH + 20;
+        totalW = std::max(viewW, json_.contentWidth);
+    } else if (m == Mode::Grid) {
+        if (doc_ && !doc_->grid.sheets.empty()) {
+            int s = std::min(grid_.sheet, (int)doc_->grid.sheets.size() - 1);
+            auto& sheet = doc_->grid.sheets[(size_t)s];
+            float z = (float)zoom_;
+            float numW = 52 * z;
+            float tw = numW;
+            int cols = MaxCols(sheet);
+            for (int c = 0; c < cols; c++) {
+                float w = c < (int)grid_.colWidths[s].size() ? grid_.colWidths[s][c] : 84;
+                tw += w * z;
+            }
+            float th = 30 * z;
+            if (!grid_.rowHeights[s].empty())
+                for (size_t r = 1; r < grid_.rowHeights[s].size(); r++) th += grid_.rowHeights[s][r] * z;
+            if (doc_->grid.sheets.size() > 1) th += 30 * z;
+            totalH = th;
+            totalW = tw;
+        } else {
+            totalH = viewH;
+            totalW = viewW;
+        }
+    } else if (m == Mode::Pdf) {
+        if (pdf_ && pdfState_.error.empty()) {
+            float pageBase = std::min(viewW - 96.0f, 900.0f);
+            if (pageBase < 260) pageBase = std::max(180.0f, viewW - 40.0f);
+            float pageW = pageBase * (float)zoom_;
+            float gap = 20.0f;
+            float h = 26.0f;
+            for (int i = 0; i < pdf_->PageCount(); i++) {
+                float pw = 1, ph = 1;
+                pdf_->PageSize(i, pw, ph);
+                h += pageW * (ph / std::max(1.0f, pw)) + gap;
+            }
+            totalH = h;
+            totalW = std::max(viewW, pageW + 80.0f);
+        }
+    } else if (m == Mode::Image) {
+        float dw = 0, dh = 0;
+        ImageDisplaySize(viewW, viewH, dw, dh);
+        if (dw > 0 && dh > 0) {
+            totalW = std::max(viewW, dw + 64.0f);
+            totalH = std::max(viewH, dh + 64.0f);
+        }
+    }
+    float maxY = std::max(0.0f, totalH - viewH);
+    float maxX = std::max(0.0f, totalW - viewW);
+    scrollY_ = Clampf(scrollY_, 0, maxY);
+    scrollX_ = Clampf(scrollX_, 0, maxX);
+    SCROLLINFO si{};
+    si.cbSize = sizeof(si);
+    si.fMask = SIF_RANGE | SIF_PAGE | SIF_POS;
+    si.nMin = 0;
+    si.nMax = (int)std::ceil(std::max(totalH, viewH));
+    si.nPage = (int)std::ceil(viewH);
+    si.nPos = (int)std::lround(scrollY_);
+    SetScrollInfo(hwnd_, SB_VERT, &si, TRUE);
+    si.nMax = (int)std::ceil(std::max(totalW, viewW));
+    si.nPage = (int)std::ceil(viewW);
+    si.nPos = (int)std::lround(scrollX_);
+    SetScrollInfo(hwnd_, SB_HORZ, &si, TRUE);
+    bool showV = maxY > 0.5f;
+    bool showH = maxX > 0.5f;
+    if (showV != vertScrollShown_) {
+        vertScrollShown_ = showV;
+        ShowScrollBar(hwnd_, SB_VERT, showV);
+    }
+    if (showH != horzScrollShown_) {
+        horzScrollShown_ = showH;
+        ShowScrollBar(hwnd_, SB_HORZ, showH);
+    }
+    // The home page itself never scrolls; the recent-file list has its own
+    // embedded scroll region.
+    if (m == Mode::Welcome) {
+        ShowScrollBar(hwnd_, SB_VERT, FALSE);
+        ShowScrollBar(hwnd_, SB_HORZ, FALSE);
+        vertScrollShown_ = horzScrollShown_ = false;
+    }
+    updatingScrollbars_ = false;
+}
+
+void DocView::InvalidateAll() {
+    if (hwnd_) InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+// ---------------------------------------------------------------- paint
+void DocView::Paint() {
+    if (!hwnd_) return;
+    if (!canvas_) canvas_ = std::make_unique<Canvas>();
+    Canvas& c = *canvas_;
+    if (!c.Begin(hwnd_, Palette::Get(dark_))) return;
+    PaintContent(c);
+    c.End();
+}
+
+void DocView::PaintContent(Canvas& c, bool exportOnly) {
+    Mode m = Mode::Welcome;
+    if (!errorMessage_.empty()) m = Mode::Error;
+    else if (!doc_) m = Mode::Welcome;
+    else if (sourceMode_) m = Mode::Source;
+    else if (doc_->kind == DocKind::Json) m = Mode::Json;
+    else if (doc_->kind == DocKind::Csv || doc_->kind == DocKind::Xlsx || doc_->kind == DocKind::Xls) m = Mode::Grid;
+    else if (doc_->kind == DocKind::Pdf) m = Mode::Pdf;
+    else if (doc_->kind == DocKind::Image) m = Mode::Image;
+    else m = Mode::Document;
+
+    if (m == Mode::Document && (layoutDirty_ || !layout_)) RelayoutIfNeeded();
+    if (m == Mode::Source && !source_.built) BuildSource();
+    if (m == Mode::Json && !json_.built) BuildJson();
+
+    c.SetTranslateUi(m == Mode::Welcome || m == Mode::Error);
+    switch (m) {
+    case Mode::Welcome: PaintWelcome(c); break;
+    case Mode::Error: PaintError(c); break;
+    case Mode::Document: PaintDocument(c); break;
+    case Mode::Source: PaintSource(c); break;
+    case Mode::Json: PaintJson(c); break;
+    case Mode::Grid: PaintGrid(c); break;
+    case Mode::Pdf: PaintPdf(c); break;
+    case Mode::Image: PaintImage(c); break;
+    }
+    c.ResetTransform();
+    if (middlePan_ && !exportOnly) {
+        auto& pal = c.palette();
+        float ax = (float)panAnchor_.x, ay = (float)panAnchor_.y;
+        float bx = (float)panCurrent_.x, by = (float)panCurrent_.y;
+        c.DrawLine(ax, ay, bx, by, pal.accent, 1.6f);
+        c.FillCircle(ax, ay, 7, pal.accentSoft);
+        c.FillCircle(ax, ay, 3.5f, pal.accent);
+        c.FillCircle(bx, by, 4, pal.accent);
+    }
+    // Ink follows the document content, then the copy affordance / pen toolbar
+    // are drawn on top so text can never cover the interactive controls.
+    c.SetTranslateUi(false);
+    PaintInk(c, exportOnly);
+    if (!exportOnly) {
+        if (!inkMode_) DrawCopyButton(c);
+        if (inkMode_) PaintInkToolbar(c);
+    }
+}
+
+bool DocView::ExportPng(float scale, std::vector<uint8_t>& png, std::wstring* error,
+                        int* outW, int* outH) {
+    if (error) error->clear();
+    png.clear();
+    if (!doc_) {
+        if (error) *error = L"当前没有可导出的内容";
+        return false;
+    }
+    if (inkDrawing_ || inkShapeDrawing_) InkEnd();
+    float viewW = PageWidth();
+    float contentH = ContentHeightDip();
+    if (viewW < 1 || contentH < 1) {
+        if (error) *error = L"窗口尺寸无效";
+        return false;
+    }
+    if (!(scale > 0.05f && scale < 64.0f)) {
+        if (error) *error = L"缩放比例无效";
+        return false;
+    }
+    double pxW = std::round((double)viewW * scale);
+    double pxH = std::round((double)contentH * scale);
+    if (pxW < 16 || pxH < 16 || pxW > 20000 || pxH > 20000 ||
+        pxW * pxH > 120.0 * 1000.0 * 1000.0) {
+        if (error) *error = L"导出尺寸超出范围";
+        return false;
+    }
+    Canvas exportCanvas;
+    if (!exportCanvas.BeginBitmap((UINT)pxW, (UINT)pxH, 96.0f * scale,
+                                  Palette::Get(dark_), true)) {
+        if (error) *error = L"无法创建导出画布";
+        return false;
+    }
+    float oldScrollX = scrollX_, oldScrollY = scrollY_;
+    scrollX_ = 0;
+    scrollY_ = 0;
+    exporting_ = true;
+    PaintContent(exportCanvas, true);
+    exporting_ = false;
+    scrollX_ = oldScrollX;
+    scrollY_ = oldScrollY;
+    if (!exportCanvas.EndBitmap(png) || png.empty()) {
+        if (error) *error = L"无法生成导出图片";
+        return false;
+    }
+    if (outW) *outW = (int)pxW;
+    if (outH) *outH = (int)pxH;
+    return true;
+}
+
+float DocView::ContentHeightDip() {
+    Mode m = Mode::Welcome;
+    if (!errorMessage_.empty()) m = Mode::Error;
+    else if (!doc_) m = Mode::Welcome;
+    else if (sourceMode_) m = Mode::Source;
+    else if (doc_->kind == DocKind::Json) m = Mode::Json;
+    else if (doc_->kind == DocKind::Csv || doc_->kind == DocKind::Xlsx || doc_->kind == DocKind::Xls) m = Mode::Grid;
+    else if (doc_->kind == DocKind::Pdf) m = Mode::Pdf;
+    else if (doc_->kind == DocKind::Image) m = Mode::Image;
+    else m = Mode::Document;
+    float viewH = heightDip();
+    if (m == Mode::Document) {
+        if (layoutDirty_ || !layout_) RelayoutIfNeeded();
+        return layout_ ? std::max(viewH, layout_->height + 20.0f) : viewH;
+    }
+    if (m == Mode::Source) {
+        if (!source_.built) BuildSource();
+        float lineH = 19.0f * (float)zoom_;
+        float gutter = 60.0f * (float)zoom_;
+        BuildSourceRows(std::max(32.0f, PageWidth() - gutter - 24.0f));
+        return std::max(viewH, 16.0f + source_.rows.size() * lineH + 30.0f);
+    }
+    if (m == Mode::Json) {
+        if (!json_.built) BuildJson();
+        float rowH = 24.0f * (float)zoom_;
+        return std::max(viewH, 24.0f + json_.rows.size() * rowH + 20.0f);
+    }
+    if (m == Mode::Grid) {
+        if (!doc_->grid.sheets.empty()) {
+            int s = std::min(grid_.sheet, (int)doc_->grid.sheets.size() - 1);
+            if (s < 0 || s >= (int)grid_.rowHeights.size()) return viewH;
+            float z = (float)zoom_;
+            float h = 30.0f * z;
+            auto& heights = grid_.rowHeights[(size_t)s];
+            auto& sheet = doc_->grid.sheets[(size_t)s];
+            for (size_t r = 1; r < sheet.rows.size(); r++)
+                h += r < heights.size() ? heights[r] * z : 27.0f * z;
+            return std::max(viewH, h + 10.0f);
+        }
+        return viewH;
+    }
+    if (m == Mode::Pdf && pdf_) {
+        float z = (float)zoom_;
+        float pageBase = std::min(PageWidth() - 96.0f, 900.0f);
+        if (pageBase < 260) pageBase = std::max(180.0f, PageWidth() - 40.0f);
+        float pageW = pageBase * z;
+        float h = 26.0f;
+        for (int i = 0; i < pdf_->PageCount(); i++) {
+            float pw = 1, ph = 1;
+            pdf_->PageSize(i, pw, ph);
+            h += pageW * (ph / std::max(1.0f, pw)) + 20.0f;
+        }
+        return std::max(viewH, h + 10.0f);
+    }
+    // Image/canvas and welcome/error keep the visible canvas size. The image
+    // itself is already the underlying bitmap and is rendered in full.
+    return viewH;
+}
+
+void DocView::WelcomeResetRecentPaging() {
+    welcomeRecentShown_ = std::min((int)recent_.size(), kWelcomeRecentPage);
+    welcomeRecentScroll_ = 0;
+    hoverWelcome_ = -1;
+}
+
+void DocView::WelcomeScrollRecent(int delta) {
+    if (recent_.empty() || delta == 0) return;
+    if (welcomeRecentShown_ <= 0) WelcomeResetRecentPaging();
+    float viewH = std::max(1.0f, welcomeRecentView_.h);
+    float contentH = welcomeRecentContentH_;
+    float maxScroll = std::max(0.0f, contentH - viewH);
+    float step = delta / 120.0f * 60.0f;
+    welcomeRecentScroll_ = Clampf(welcomeRecentScroll_ - step, 0, maxScroll);
+    if (delta < 0 && welcomeRecentScroll_ >= maxScroll - 0.5f &&
+        welcomeRecentShown_ < (int)recent_.size()) {
+        welcomeRecentShown_ = std::min((int)recent_.size(),
+                                       welcomeRecentShown_ + kWelcomeRecentPage);
+        float newContentH = welcomeRecentShown_ * kWelcomeRowH + 30.0f;
+        welcomeRecentScroll_ = std::min(welcomeRecentScroll_ + 18.0f,
+                                        std::max(0.0f, newContentH - viewH));
+    }
+    hoverWelcome_ = -1;
+    InvalidateAll();
+}
+
+void DocView::PaintWelcome(Canvas& c) {
+    c.SetTranslateUi(true);
+    float w = c.widthDip(), h = c.heightDip();
+    float cx = w / 2;
+    float top = std::max(34.0f, (h - 560.0f) / 2);
+    if (top > 120) top = 120;
+
+    c.FillRound(cx - 38, top, 76, 76, 16, c.palette().accentSoft);
+    c.DrawText(L"md", cx - 38, top + 8, 76, 60, 34, c.palette().accent, true, false,
+               DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+    c.DrawText(L"openmd", cx - 200, top + 92, 400, 42, 32, c.palette().fg, true, false,
+               DWRITE_TEXT_ALIGNMENT_CENTER);
+
+    float btnW = 154, btnH = 42;
+    float btnX = cx - btnW / 2, btnY = top + 174;
+    welcomeOpenRect_ = { btnX, btnY, btnW, btnH };
+    c.FillRound(btnX, btnY, btnW, btnH, 8, c.palette().accent);
+    c.DrawText(L"打开文件", btnX, btnY + 1, btnW, btnH - 2, 14, HexColor(L"#FFFFFF"), true, false,
+               DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+    c.DrawText(L"Ctrl+O   ·   也可以把文件直接拖进窗口", cx - 300, btnY + 50, 600, 22, 12,
+               c.palette().muted, false, false, DWRITE_TEXT_ALIGNMENT_CENTER);
+
+    std::vector<std::wstring> chips = { L"Markdown", L"JSON", L"Notebook", L"CSV", L"PDF", L"Word", L"Excel", L"纯文本" };
+    float chipH = 24, gap = 8;
+    std::vector<float> widths;
+    float total = 0;
+    for (auto& s : chips) {
+        float cw = c.MeasureText(s, 11.5f, false, false, 500, false) + 22;
+        widths.push_back(cw);
+        total += cw;
+    }
+    total += gap * (chips.size() - 1);
+    float chipX = cx - total / 2, chipY = btnY + 92;
+    for (size_t i = 0; i < chips.size(); i++) {
+        c.StrokeRound(chipX, chipY, widths[i], chipH, 12, c.palette().border);
+        c.DrawText(chips[i], chipX, chipY + 1, widths[i], chipH - 2, 11.5f, c.palette().muted, false, false,
+                   DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+        chipX += widths[i] + gap;
+    }
+
+    welcomeRecentRects_.clear();
+    welcomeRecentPaths_.clear();
+    welcomeRecentRowIndices_.clear();
+    welcomeRecentView_ = DRect{};
+    welcomeRecentContentH_ = 0;
+    float listHeaderTop = chipY + 54;
+    if (!recent_.empty()) {
+        if (welcomeRecentShown_ <= 0)
+            welcomeRecentShown_ = std::min((int)recent_.size(), kWelcomeRecentPage);
+        welcomeRecentShown_ = std::min(welcomeRecentShown_, (int)recent_.size());
+        c.DrawText(L"最近打开", cx - 280, listHeaderTop, 560, 22, 12, c.palette().muted, true);
+        float viewTop = listHeaderTop + 28;
+        float viewH = std::max(80.0f, h - viewTop - 24);
+        float rowW = std::min(560.0f, w - 40);
+        float viewX = cx - rowW / 2;
+        welcomeRecentView_ = { viewX, viewTop, rowW, viewH };
+        welcomeRecentContentH_ = welcomeRecentShown_ * kWelcomeRowH + 30.0f;
+        float maxScroll = std::max(0.0f, welcomeRecentContentH_ - viewH);
+        welcomeRecentScroll_ = Clampf(welcomeRecentScroll_, 0, maxScroll);
+
+        c.PushClip(viewX - 2, viewTop - 2, rowW + 4, viewH + 4);
+        for (int i = 0; i < welcomeRecentShown_; i++) {
+            float rowY = viewTop + i * kWelcomeRowH - welcomeRecentScroll_;
+            if (rowY + 38 < viewTop || rowY > viewTop + viewH) continue;
+            DRect r{ viewX, rowY, rowW, 38 };
+            if (hoverWelcome_ == i) c.FillRound(r.x, r.y, r.w, r.h, 6, c.palette().hover);
+            const std::wstring& p = recent_[(size_t)i];
+            bool exists = FileExists(p);
+            c.DrawText(PathName(p), r.x + 12, r.y + 3, r.w - 24, 19, 12.5f,
+                       exists ? c.palette().fg : c.palette().muted, true, false,
+                       DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_NEAR, false);
+            c.DrawText(PathDir(p), r.x + 12, r.y + 20, r.w - 24, 16, 10.5f, c.palette().muted, false, false,
+                       DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_NEAR, false);
+            welcomeRecentRects_.push_back(r);
+            welcomeRecentPaths_.push_back(p);
+            welcomeRecentRowIndices_.push_back(i);
+        }
+        float footerY = viewTop + welcomeRecentShown_ * kWelcomeRowH - welcomeRecentScroll_;
+        bool more = welcomeRecentShown_ < (int)recent_.size();
+        if (footerY + 30 >= viewTop && footerY <= viewTop + viewH) {
+            c.DrawText(more ? L"继续向下滑动加载更多" : L"已加载全部最近记录",
+                       viewX, footerY + 5, rowW, 20, 10.5f, c.palette().muted, false, false,
+                       DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_NEAR, false);
+        }
+        c.PopClip();
+
+        if (welcomeRecentContentH_ > viewH) {
+            float trackX = std::min(viewX + rowW + 6, w - 8);
+            Color track = c.palette().border;
+            track.a = 0.45f;
+            c.FillRound(trackX, viewTop, 3, viewH, 1.5f, track);
+            float thumbH = std::max(28.0f, viewH * viewH / welcomeRecentContentH_);
+            float thumbY = viewTop;
+            if (maxScroll > 0.5f)
+                thumbY += welcomeRecentScroll_ / maxScroll * (viewH - thumbH);
+            Color thumb = c.palette().muted;
+            thumb.a = 0.55f;
+            c.FillRound(trackX, thumbY, 3, thumbH, 1.5f, thumb);
+        }
+    } else {
+        c.DrawText(L"打开一个文件后，最近记录会显示在这里。", cx - 280, listHeaderTop, 560, 22, 12,
+                   c.palette().muted, false, false, DWRITE_TEXT_ALIGNMENT_CENTER);
+    }
+}
+
+void DocView::PaintError(Canvas& c) {
+    c.SetTranslateUi(true);
+    float w = c.widthDip(), h = c.heightDip();
+    float cardW = std::min(660.0f, w - 40);
+    float cardX = (w - cardW) / 2;
+    float cardY = std::max(40.0f, (h - 380.0f) / 2);
+    c.FillRound(cardX, cardY, cardW, 340, 12, c.palette().surface);
+    c.StrokeRound(cardX, cardY, cardW, 340, 12, c.palette().border);
+    c.FillCircle(cardX + 46, cardY + 46, 18, c.palette().dangerSoft);
+    c.DrawText(L"!", cardX + 28, cardY + 30, 36, 32, 22, c.palette().danger, true, false,
+               DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+    c.DrawText(L"无法打开文件", cardX + 76, cardY + 30, cardW - 100, 34, 20, c.palette().fg, true);
+    c.DrawText(errorMessage_, cardX + 30, cardY + 84, cardW - 60, 130, 13, c.palette().muted, false, false,
+               DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_NEAR, true);
+    c.DrawText(errorPath_, cardX + 30, cardY + 218, cardW - 60, 20, 11.5f, c.palette().muted, false, true,
+               DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_NEAR, false);
+
+    float by = cardY + 264, bh = 38;
+    errorOpenRect_ = { cardX + 30, by, 148, bh };
+    c.FillRound(errorOpenRect_.x, errorOpenRect_.y, errorOpenRect_.w, errorOpenRect_.h, 7, c.palette().accent);
+    c.DrawText(L"打开其他文件", errorOpenRect_.x, by + 1, errorOpenRect_.w, bh - 2, 13, HexColor(L"#FFFFFF"), true, false,
+               DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+    errorExternalRect_ = { cardX + 190, by, 180, bh };
+    c.StrokeRound(errorExternalRect_.x, errorExternalRect_.y, errorExternalRect_.w, errorExternalRect_.h, 7, c.palette().border);
+    c.DrawText(L"用系统默认程序打开", errorExternalRect_.x, by + 1, errorExternalRect_.w, bh - 2, 12.5f,
+               c.palette().fg, false, false, DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+    errorSourceRect_ = { 0, 0, 0, 0 };
+}
+
+void DocView::PaintDocument(Canvas& c) {
+    if (!layout_) return;
+    c.PushClip(0, 0, c.widthDip(), c.heightDip());
+    c.SetTransform(0, -scrollY_);
+    float z = (float)zoom_;
+    auto& p = c.palette();
+    for (auto& g : layout_->groups) {
+        if (g.y + g.h < scrollY_ - 80 || g.y > scrollY_ + c.heightDip() + 80) continue;
+        Color bg = g.role == 1 ? p.accentSoft : p.surface;
+        c.FillRound(g.x, g.y, g.w, g.h, 12 * z, bg);
+        if (g.role == 2) c.StrokeRound(g.x, g.y, g.w, g.h, 12 * z, p.border);
+    }
+    for (auto& it : layout_->items) {
+        if (it.y + it.h < scrollY_ - 100 || it.y > scrollY_ + c.heightDip() + 100) continue;
+        const Block& b = *it.block;
+        switch (b.kind) {
+        case BlockKind::Heading:
+            if (b.level <= 1) c.FillRect(it.x, it.contentY + it.h - 1, it.w, 1, p.border);
+            it.main.Draw(c, it.contentX, it.contentY);
+            break;
+        case BlockKind::Paragraph:
+        case BlockKind::Quote:
+            if (b.quote) c.FillRect(it.x, it.y + 4, 3 * z, it.h - 8, p.quoteBar);
+            it.main.Draw(c, it.contentX, it.contentY);
+            break;
+        case BlockKind::ListItem: {
+            float ix = it.contentX - 24 * z;
+            float cy = it.y + 3 * z;
+            if (b.task) {
+                float sz = 13 * z;
+                c.StrokeRound(ix, cy + 2, sz, sz, 3 * z, b.checked ? p.accent : p.muted);
+                if (b.checked)
+                    c.DrawText(L"✓", ix, cy, sz, sz, 10.5f * z, p.accent, true, false,
+                               DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            } else if (b.ordered) {
+                c.DrawText(std::to_wstring(b.number) + L".", ix, cy, 20 * z, 22 * z, 12.5f * z, p.muted, false, false,
+                           DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_PARAGRAPH_ALIGNMENT_NEAR, false);
+            } else {
+                c.FillCircle(ix + 7 * z, cy + 10 * z, 2.2f * z, p.muted);
+            }
+            it.main.Draw(c, it.contentX, it.contentY);
+            break;
+        }
+        case BlockKind::Code:
+        case BlockKind::OutputText: {
+            Color bg = b.kind == BlockKind::OutputText ? (b.error ? p.dangerSoft : p.codeBg) : p.codeBg;
+            c.FillRound(it.x, it.y, it.w, it.h, 8 * z, bg);
+            c.StrokeRound(it.x, it.y, it.w, it.h, 8 * z, b.error ? p.danger : p.border);
+            if (!it.label.empty())
+                c.DrawText(it.label, it.x + 14 * z, it.y + 6 * z, it.w - 28 * z, 16 * z, 10.5f * z,
+                           b.error ? p.danger : p.muted, true, true,
+                           DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_NEAR, false);
+            it.main.Draw(c, it.contentX, it.contentY);
+            break;
+        }
+        case BlockKind::Math:
+            if (b.math) {
+                DrawMath(*b.math, c.target(), Engine::Instance().DWrite(), it.mathX, it.mathBaseline,
+                         it.mathSize, b.output ? p.muted : p.fg);
+                if (!it.label.empty())
+                    c.DrawText(it.label, it.x, it.y, it.w, 16 * z, 10.5f * z, p.muted, true, false,
+                               DWRITE_TEXT_ALIGNMENT_CENTER);
+            }
+            break;
+        case BlockKind::Table:
+            for (auto& cell : it.cells) {
+                if (cell.header) c.FillRect(cell.x, cell.y, cell.w, cell.h, p.tableHead);
+                c.StrokeRect(cell.x, cell.y, cell.w, cell.h, p.border, 1.0f);
+                cell.rt.Draw(c, cell.x + 8 * z, cell.y + 7 * z);
+            }
+            break;
+        case BlockKind::Image:
+        case BlockKind::OutputImage: {
+            if (b.kind == BlockKind::OutputImage) {
+                c.FillRound(it.x, it.y, it.w, it.h, 8 * z, p.surface);
+                c.StrokeRound(it.x, it.y, it.w, it.h, 8 * z, p.border);
+                if (!it.label.empty())
+                    c.DrawText(it.label, it.x + 14 * z, it.y + 7 * z, it.w - 28 * z, 16 * z, 10.5f * z, p.muted, true, false);
+            }
+            if (it.imageOk && it.image) {
+                if (auto* bmp = c.Image(*it.image))
+                    c.target()->DrawBitmap(bmp, D2D1::RectF(it.imageX, it.imageY, it.imageX + it.imageW,
+                                                            it.imageY + it.imageH), 1.0f,
+                                           D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+            } else {
+                float ph = b.kind == BlockKind::OutputImage ? 44 * z : 32 * z;
+                float py = it.contentY;
+                c.FillRound(it.x, py, it.w, ph, 6 * z, p.surface);
+                c.StrokeRound(it.x, py, it.w, ph, 6 * z, p.border);
+                std::wstring label = b.image ? L"图片无法显示" : (b.text.empty() ? L"图片" : b.text);
+                if (it.label.empty()) it.label = L"";
+                c.DrawText(label.empty() ? L"图片无法显示" : label, it.x + 12 * z, py, it.w - 24 * z, ph, 11.5f * z,
+                           p.muted, false, false, DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, false);
+            }
+            break;
+        }
+        case BlockKind::Hr:
+            c.FillRect(it.x, it.y + it.h / 2, it.w, 1, p.border);
+            break;
+        case BlockKind::Session:
+            c.FillRound(it.x, it.y, it.w, it.h, 10 * z, p.surface);
+            c.StrokeRound(it.x, it.y, it.w, it.h, 10 * z, p.border);
+            c.DrawText(it.label, it.contentX, it.y + 12 * z, it.w - 36 * z, 16 * z, 11 * z, p.accent, true);
+            it.main.Draw(c, it.contentX, it.contentY);
+            if (!it.badge.empty())
+                c.DrawText(it.badge, it.contentX, it.contentY + it.main.height + 4 * z, it.w - 36 * z, 18 * z,
+                           11.5f * z, p.muted, false, false);
+            break;
+        case BlockKind::ChatHeader: {
+            Color lc = b.chatRole == 1 ? p.accent : p.muted;
+            DWRITE_TEXT_ALIGNMENT align = it.labelRight ? DWRITE_TEXT_ALIGNMENT_TRAILING : DWRITE_TEXT_ALIGNMENT_LEADING;
+            c.DrawText(it.label, it.contentX, it.y + 5 * z, it.w, 17 * z, 11.5f * z, lc, true, false, align);
+            if (!it.badge.empty())
+                c.DrawText(it.badge, it.contentX, it.y + 5 * z, it.w, 17 * z, 10.5f * z, p.muted, false, false,
+                           DWRITE_TEXT_ALIGNMENT_TRAILING);
+            break;
+        }
+        case BlockKind::Reasoning:
+        case BlockKind::Tool: {
+            c.FillRound(it.x, it.y, it.w, it.h, 8 * z, p.surface);
+            c.StrokeRound(it.x, it.y, it.w, it.h, 8 * z, p.border);
+            if (it.chevron) {
+                float cy = it.y + 15 * z;
+                float cx = it.x + 12 * z;
+                if (b.expanded) {
+                    c.DrawLine(cx, cy, cx + 4 * z, cy + 4 * z, p.muted, 1.5f);
+                    c.DrawLine(cx + 4 * z, cy + 4 * z, cx + 8 * z, cy, p.muted, 1.5f);
+                } else {
+                    c.DrawLine(cx, cy, cx + 4 * z, cy + 4 * z, p.muted, 1.5f);
+                    c.DrawLine(cx + 4 * z, cy + 4 * z, cx, cy + 8 * z, p.muted, 1.5f);
+                }
+            }
+            c.DrawText(it.label, it.contentX, it.y + 9 * z, it.w - (it.contentX - it.x) - 14 * z, 18 * z,
+                       11.5f * z, b.kind == BlockKind::Tool ? p.codeType : p.muted, true, false,
+                       DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_NEAR, false);
+            if (b.expanded) it.main.Draw(c, it.contentX, it.contentY);
+            break;
+        }
+        case BlockKind::Banner:
+            c.FillRound(it.x, it.y, it.w, it.h, 8 * z, p.accentSoft);
+            if (!it.label.empty())
+                c.DrawText(it.label, it.contentX, it.y + 10 * z, it.w - 28 * z, 16 * z, 11 * z, p.accent, true);
+            it.main.Draw(c, it.contentX, it.contentY);
+            break;
+        default:
+            if (it.main.layout) it.main.Draw(c, it.contentX, it.contentY);
+            break;
+        }
+    }
+    c.PopClip();
+}
+
+void DocView::PaintSource(Canvas& c) {
+    if (!source_.built) BuildSource();
+    float z = (float)zoom_;
+    float lineH = 19.0f * z;
+    float gutter = 60.0f * z;
+    float font = 13.0f * z;
+    float avail = std::max(32.0f, c.widthDip() - gutter - 24.0f);
+    BuildSourceRows(avail);
+    auto& p = c.palette();
+    c.FillRect(0, 0, gutter, c.heightDip(), p.surface);
+    c.FillRect(gutter - 1, 0, 1, c.heightDip(), p.border);
+    c.PushClip(gutter, 0, c.widthDip() - gutter, c.heightDip());
+    int first = std::max(0, (int)((scrollY_ - 16) / lineH) - 1);
+    int last = std::min((int)source_.rows.size(), first + (int)(c.heightDip() / lineH) + 4);
+    for (int i = first; i < last; i++) {
+        float y = 16 + i * lineH - scrollY_;
+        c.DrawText(source_.rows[(size_t)i], gutter + 12 * z, y, avail, lineH, font,
+                   p.fg, false, true, DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_NEAR, false);
+    }
+    c.PopClip();
+    c.PushClip(0, 0, gutter, c.heightDip());
+    for (int i = first; i < last; i++) {
+        int logical = i < (int)source_.rowLines.size() ? source_.rowLines[(size_t)i] : -1;
+        if (logical < 0) continue;
+        if (i > 0 && i - 1 < (int)source_.rowLines.size() &&
+            source_.rowLines[(size_t)(i - 1)] == logical) continue;
+        float y = 16 + i * lineH - scrollY_;
+        c.DrawText(std::to_wstring(logical + 1), 4, y, gutter - 12, lineH, font * 0.92f, p.muted, false, true,
+                   DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_PARAGRAPH_ALIGNMENT_NEAR, false);
+    }
+    c.PopClip();
+}
+
+void DocView::PaintJson(Canvas& c) {
+    if (!json_.built) BuildJson();
+    float z = (float)zoom_;
+    float rowH = 24.0f * z;
+    float font = 13.0f * z;
+    float indent = 18.0f * z;
+    auto& p = c.palette();
+    c.PushClip(0, 0, c.widthDip(), c.heightDip());
+    int first = std::max(0, (int)((scrollY_ - 16) / rowH) - 1);
+    int last = std::min((int)json_.rows.size(), first + (int)(c.heightDip() / rowH) + 4);
+    for (int i = first; i < last; i++) {
+        auto& r = json_.rows[(size_t)i];
+        float y = 16 + i * rowH - scrollY_;
+        if (i == hoverJsonRow_) c.FillRect(0, y, c.widthDip(), rowH, p.hover);
+        float x = 16 + r.depth * indent - scrollX_;
+        if (r.container && !r.closing) {
+            float ax = x + 2, ay = y + rowH / 2 - 4 * z;
+            if (r.expanded) {
+                c.DrawLine(ax, ay + 1 * z, ax + 8 * z, ay + 1 * z, p.muted, 1.2f);
+                c.DrawLine(ax + 8 * z, ay + 1 * z, ax + 4 * z, ay + 6 * z, p.muted, 1.2f);
+                c.DrawLine(ax + 4 * z, ay + 6 * z, ax, ay + 1 * z, p.muted, 1.2f);
+            } else {
+                c.DrawLine(ax, ay, ax + 5 * z, ay + 4 * z, p.muted, 1.2f);
+                c.DrawLine(ax + 5 * z, ay + 4 * z, ax, ay + 8 * z, p.muted, 1.2f);
+            }
+        }
+        float tx = x + (r.container ? 14 * z : 2 * z);
+        if (r.closing) {
+            std::wstring close = r.valueType == 4 ? L"}" : L"]";
+            if (r.hasComma) close += L",";
+            c.DrawText(close, tx, y, 200, rowH, font, p.muted, false, true,
+                       DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_NEAR, false);
+            continue;
+        }
+        float cx = tx;
+        if (!r.key.empty()) {
+            std::wstring key = r.key + L": ";
+            c.DrawText(key, cx, y, 2000, rowH, font, p.jsonKey, false, true,
+                       DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_NEAR, false);
+            cx += c.MeasureText(key, font, false, true, 100000, false);
+        }
+        std::wstring value = r.value;
+        if (r.container) {
+            value = (r.valueType == 4 ? L"{" : L"[");
+            if (!r.expanded) {
+                value += (r.valueType == 4 ? L"…}" : L"…]");
+                if (r.hasComma) value += L",";
+            }
+        } else if (r.hasComma) value += L",";
+        Color vc = p.fg;
+        switch (r.valueType) {
+        case 0: vc = p.jsonNull; break;
+        case 1: vc = p.jsonBool; break;
+        case 2: vc = p.jsonNumber; break;
+        case 3: vc = p.jsonString; break;
+        default: vc = p.muted; break;
+        }
+        c.DrawText(value, cx, y, 4000, rowH, font, vc, false, true,
+                   DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_NEAR, false);
+    }
+    c.PopClip();
+}
+
+void DocView::PaintGrid(Canvas& c) {
+    if (!doc_ || doc_->grid.sheets.empty()) {
+        c.DrawText(L"表格为空", c.widthDip() / 2 - 100, c.heightDip() / 2 - 10, 200, 20, 13,
+                   c.palette().muted, false, false, DWRITE_TEXT_ALIGNMENT_CENTER);
+        return;
+    }
+    int s = std::min(grid_.sheet, (int)doc_->grid.sheets.size() - 1);
+    auto& sheet = doc_->grid.sheets[(size_t)s];
+    auto& p = c.palette();
+    float z = (float)zoom_;
+    float numW = 52 * z;
+    float headerH = 30 * z;
+    int cols = MaxCols(sheet);
+    float tabH = (!exporting_ && doc_->grid.sheets.size() > 1) ? 30 * z : 0;
+    float bodyH = c.heightDip() - tabH;
+    c.FillRect(0, 0, c.widthDip(), c.heightDip(), p.bg);
+    c.PushClip(numW, 0, c.widthDip() - numW, headerH);
+    float x = numW - scrollX_;
+    for (int col = 0; col < cols; col++) {
+        float cw = col < (int)grid_.colWidths[s].size() ? grid_.colWidths[s][col] * z : 84 * z;
+        if (x + cw < numW || x > c.widthDip()) { x += cw; continue; }
+        c.FillRect(x, 0, cw, headerH, p.tableHead);
+        c.StrokeRect(x, 0, cw, headerH, p.border, 1);
+        c.DrawText(CellString(sheet, 0, col), x + 8 * z, 0, cw - 16 * z, headerH, 12.5f * z, p.fg, true, false,
+                   DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, false);
+        x += cw;
+    }
+    c.PopClip();
+
+    c.PushClip(numW, headerH, c.widthDip() - numW, bodyH - headerH);
+    float y = headerH - scrollY_;
+    for (size_t r = 1; r < sheet.rows.size(); r++) {
+        float rh = r < grid_.rowHeights[s].size() ? grid_.rowHeights[s][r] * z : 27 * z;
+        if (y + rh < headerH) { y += rh; continue; }
+        if (y > bodyH) break;
+        float cx = numW - scrollX_;
+        for (int col = 0; col < cols; col++) {
+            float cw = col < (int)grid_.colWidths[s].size() ? grid_.colWidths[s][col] * z : 84 * z;
+            if (cx + cw < numW) { cx += cw; continue; }
+            if (cx > c.widthDip()) break;
+            bool sel = selectedRow_ == (int)r && selectedCol_ == col;
+            if (sel) c.FillRect(cx, y, cw, rh, p.selection);
+            c.StrokeRect(cx, y, cw, rh, p.border, 1);
+            c.DrawText(CellString(sheet, (int)r, col), cx + 8 * z, y, cw - 16 * z, rh, 12.5f * z, p.fg, false, false,
+                       DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, false);
+            cx += cw;
+        }
+        y += rh;
+    }
+    c.PopClip();
+
+    c.FillRect(0, 0, numW, bodyH, p.surface);
+    c.FillRect(numW - 1, 0, 1, bodyH, p.border);
+    c.PushClip(0, headerH, numW, bodyH - headerH);
+    float ry = headerH - scrollY_;
+    for (size_t r = 1; r < sheet.rows.size(); r++) {
+        float rh = r < grid_.rowHeights[s].size() ? grid_.rowHeights[s][r] * z : 27 * z;
+        if (ry + rh >= headerH && ry <= bodyH) {
+            bool sel = selectedRow_ == (int)r;
+            c.DrawText(std::to_wstring(r), 4, ry, numW - 10, rh, 11.5f * z,
+                       sel ? p.accent : p.muted, sel, false,
+                       DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, false);
+            c.FillRect(0, ry + rh - 1, numW - 1, 1, p.border);
+        }
+        ry += rh;
+    }
+    c.PopClip();
+    c.FillRect(0, headerH - 1, c.widthDip(), 1, p.border);
+
+    if (tabH > 0) {
+        float ty = bodyH;
+        c.FillRect(0, ty, c.widthDip(), tabH, p.surface);
+        c.FillRect(0, ty, c.widthDip(), 1, p.border);
+        float tx = 8;
+        for (size_t i = 0; i < doc_->grid.sheets.size(); i++) {
+            std::wstring name = doc_->grid.sheets[i].name.empty() ? L"Sheet" : doc_->grid.sheets[i].name;
+            float tw = c.MeasureText(name, 11.5f, false, false, 400, false) + 28;
+            bool active = (int)i == grid_.sheet;
+            if (active) c.FillRound(tx, ty + 4, tw, tabH - 8, 5, p.accentSoft);
+            c.DrawText(name, tx, ty + 4, tw, tabH - 8, 11.5f, active ? p.accent : p.muted, active, false,
+                       DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, false);
+            tx += tw + 4;
+        }
+    }
+    if (doc_->grid.truncated && !doc_->grid.note.empty())
+        c.DrawText(doc_->grid.note, numW + 12, bodyH - 22 * z, c.widthDip() - numW - 24, 18 * z, 10.5f * z,
+                   p.muted, false, false, DWRITE_TEXT_ALIGNMENT_LEADING);
+
+    // Show the active resize edge so the draggable area is discoverable even
+    // without moving the pointer onto exactly the right pixel.
+    int sepCol = dragging_ == 1 ? dragIndex_ : hoverGridColSep_;
+    if (sepCol >= 0) {
+        float xx = numW - scrollX_;
+        for (int col = 0; col <= sepCol && col < MaxCols(sheet); col++) {
+            float cw = col < (int)grid_.colWidths[s].size() ? grid_.colWidths[s][col] * z : 84 * z;
+            xx += cw;
+        }
+        if (xx >= numW && xx <= c.widthDip()) {
+            Color hl = p.accent;
+            hl.a = 0.85f;
+            c.FillRect(xx - 1, 0, 2, headerH, hl);
+        }
+    }
+    int sepRow = dragging_ == 2 ? dragIndex_ : hoverGridRowSep_;
+    if (sepRow >= 0) {
+        float yy = headerH - scrollY_;
+        for (int r = 1; r <= sepRow && r < (int)sheet.rows.size(); r++) {
+            float rh = r < (int)grid_.rowHeights[s].size() ? grid_.rowHeights[s][r] * z : 27 * z;
+            yy += rh;
+        }
+        if (yy >= headerH && yy <= bodyH) {
+            Color hl = p.accent;
+            hl.a = 0.55f;
+            c.FillRect(0, yy - 1, c.widthDip(), 2, hl);
+        }
+    }
+}
+
+void DocView::PaintPdf(Canvas& c) {
+    c.SetTranslateUi(true);
+    if (!pdf_) {
+        c.DrawText(pdfState_.error.empty() ? L"PDF 渲染不可用" : pdfState_.error, 40, 40,
+                   c.widthDip() - 80, 80, 14, c.palette().muted, false, false,
+                   DWRITE_TEXT_ALIGNMENT_CENTER);
+        return;
+    }
+    if (!pdfState_.error.empty()) {
+        c.DrawText(pdfState_.error, 40, 40, c.widthDip() - 80, 80, 14, c.palette().danger, false, false,
+                   DWRITE_TEXT_ALIGNMENT_CENTER);
+        return;
+    }
+    float z = (float)zoom_;
+    float pageBase = std::min(c.widthDip() - 96.0f, 900.0f);
+    if (pageBase < 260) pageBase = std::max(180.0f, c.widthDip() - 40.0f);
+    float pageW = pageBase * z;
+    float gap = 20.0f;
+    float y = 26.0f - scrollY_;
+    auto& p = c.palette();
+    for (int i = 0; i < pdf_->PageCount(); i++) {
+        float pw = 1, ph = 1;
+        pdf_->PageSize(i, pw, ph);
+        float pageH = pageW * (ph / std::max(1.0f, pw));
+        if (y + pageH < -40 || y > c.heightDip() + 40) { y += pageH + gap; continue; }
+        float x = (c.widthDip() - pageW) / 2 - (scrollX_ > 0 ? scrollX_ : 0);
+        c.FillRound(x + 2, y + 3, pageW, pageH, 2, HexColor(L"#000000", 0.12f));
+        c.FillRect(x, y, pageW, pageH, HexColor(L"#FFFFFF"));
+        c.StrokeRect(x, y, pageW, pageH, p.border, 1);
+        int maxPx = exporting_ ? 12000 : 2400;
+        int targetPx = (int)Clampf(pageW * c.scale() * 1.35f, 300.0f, (float)maxPx);
+        if (i >= (int)pdfState_.pages.size()) {
+            pdfState_.pages.resize(pdf_->PageCount());
+            pdfState_.renderedWidth.resize(pdf_->PageCount(), 0);
+        }
+        if ((!pdfState_.pages[(size_t)i] || pdfState_.renderedWidth[(size_t)i] != targetPx) && !pdfRendering_) {
+            pdfRendering_ = true;
+            std::vector<uint8_t> png;
+            std::wstring err;
+            bool ok = pdf_->RenderPage(i, targetPx, png, err) && !png.empty();
+            pdfRendering_ = false;
+            if (ok) {
+                auto img = std::make_shared<ImageRef>();
+                img->bytes = std::move(png);
+                img->mime = L"image/png";
+                img->cacheKey = L"pdf:" + doc_->path + L":" + std::to_wstring(i) + L":" + std::to_wstring(targetPx);
+                pdfState_.pages[(size_t)i] = img;
+                pdfState_.renderedWidth[(size_t)i] = targetPx;
+                int rendered = 0;
+                for (auto& p : pdfState_.pages) if (p) rendered++;
+                if (rendered > 8) {
+                    for (int k = 0; k < (int)pdfState_.pages.size(); k++) {
+                        if (std::abs(k - i) > 2) {
+                            pdfState_.pages[(size_t)k].reset();
+                            pdfState_.renderedWidth[(size_t)k] = 0;
+                        }
+                    }
+                    c.ClearImageCache();
+                }
+            } else if (!err.empty()) {
+                pdfState_.error = err;
+                break;
+            }
+        }
+        if (pdfState_.pages[(size_t)i]) {
+            if (auto* bmp = c.Image(*pdfState_.pages[(size_t)i])) {
+                c.PushClip(x, y, pageW, pageH);
+                c.target()->DrawBitmap(bmp, D2D1::RectF(x, y, x + pageW, y + pageH), 1.0f,
+                                       D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+                c.PopClip();
+            }
+        }
+        PaintPdfHighlights(c, i, x, y, pageW, pageH);
+        if (!exporting_)
+            c.DrawText(L"第 " + std::to_wstring(i + 1) + L" / " + std::to_wstring(pdf_->PageCount()) + L" 页",
+                       x, y + pageH + 2, pageW, 16, 10, p.muted, false, false,
+                       DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_NEAR, false);
+        y += pageH + gap;
+    }
+}
+
+void DocView::PaintImage(Canvas& c) {
+    c.SetTranslateUi(true);
+    if (!doc_ || !doc_->image) {
+        c.DrawText(L"无法显示图片", 40, 40, c.widthDip() - 80, 40, 14, c.palette().muted, false, false,
+                   DWRITE_TEXT_ALIGNMENT_CENTER);
+        return;
+    }
+    float x = 0, y = 0, dw = 0, dh = 0;
+    if (!ImageDisplayRect(x, y, dw, dh)) {
+        c.DrawText(L"无法显示图片", 40, 40, c.widthDip() - 80, 40, 14, c.palette().muted, false, false,
+                   DWRITE_TEXT_ALIGNMENT_CENTER);
+        return;
+    }
+    auto* bmp = c.Image(*doc_->image);
+    if (!bmp) {
+        c.DrawText(L"无法解码图片", 40, 40, c.widthDip() - 80, 40, 14, c.palette().muted, false, false,
+                   DWRITE_TEXT_ALIGNMENT_CENTER);
+        return;
+    }
+    if (!exporting_)
+        c.FillRound(x - 4, y - 4, dw + 8, dh + 8, 4, c.palette().surface);
+    c.target()->DrawBitmap(bmp, D2D1::RectF(x, y, x + dw, y + dh), 1.0f,
+                           D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+}
+
+void DocView::UpdateCopyHover(float x, float y) {
+    CopyTarget old = copyHover_;
+    copyHover_.active = false;
+    copyHover_.block = nullptr;
+    copyHover_.cellIndex = -1;
+    copyHover_.row = copyHover_.col = -1;
+
+    Mode m = Mode::Welcome;
+    if (!errorMessage_.empty()) m = Mode::Error;
+    else if (!doc_) m = Mode::Welcome;
+    else if (sourceMode_) m = Mode::Source;
+    else if (doc_->kind == DocKind::Json) m = Mode::Json;
+    else if (doc_->kind == DocKind::Csv || doc_->kind == DocKind::Xlsx || doc_->kind == DocKind::Xls) m = Mode::Grid;
+    else if (doc_->kind == DocKind::Pdf) m = Mode::Pdf;
+    else if (doc_->kind == DocKind::Image) m = Mode::Image;
+    else m = Mode::Document;
+
+    if (m == Mode::Document) {
+        if (!layout_) RelayoutIfNeeded();
+        if (layout_) {
+            for (auto& it : layout_->items) {
+                const Block& b = *it.block;
+                float top = it.y - scrollY_;
+                if (b.kind == BlockKind::Code && !b.text.empty() &&
+                    x >= it.x && x <= it.x + it.w && y >= top && y <= top + it.h) {
+                    copyHover_.active = true;
+                    copyHover_.kind = 1;
+                    copyHover_.block = &b;
+                    copyHover_.rect = { it.x + it.w - 38, top + 8, 28, 22 };
+                    break;
+                }
+                if (b.kind == BlockKind::Table) {
+                    bool found = false;
+                    for (size_t c = 0; c < it.cells.size(); c++) {
+                        auto& cell = it.cells[c];
+                        if (cell.rt.text.empty()) continue;
+                        float cy = cell.y - scrollY_;
+                        if (x >= cell.x && x <= cell.x + cell.w && y >= cy && y <= cy + cell.h) {
+                            copyHover_.active = true;
+                            copyHover_.kind = 2;
+                            copyHover_.block = &b;
+                            copyHover_.cellIndex = (int)c;
+                            copyHover_.rect = { cell.x + cell.w - 32, cy + 4, 26, 20 };
+                            found = true;
+                            break;
+                        }
+                    }
+                    if (found) break;
+                }
+            }
+        }
+    } else if (m == Mode::Grid && doc_ && !doc_->grid.sheets.empty()) {
+        int s = std::min(grid_.sheet, (int)doc_->grid.sheets.size() - 1);
+        auto& sheet = doc_->grid.sheets[(size_t)s];
+        float z = (float)zoom_;
+        float numW = 52 * z, headerH = 30 * z;
+        float tabH = doc_->grid.sheets.size() > 1 ? 30 * z : 0;
+        float bodyH = heightDip() - tabH;
+        if (x > numW && y < headerH) {
+            float cx = numW - scrollX_;
+            for (int c = 0; c < MaxCols(sheet); c++) {
+                float cw = c < (int)grid_.colWidths[s].size() ? grid_.colWidths[s][c] * z : 84 * z;
+                if (x >= cx && x < cx + cw) {
+                    copyHover_.active = true;
+                    copyHover_.kind = 3;
+                    copyHover_.row = 0;
+                    copyHover_.col = c;
+                    copyHover_.rect = { cx + cw - 44, (headerH - 20) / 2, 24, 20 };
+                    break;
+                }
+                cx += cw;
+            }
+        } else if (x > numW && y > headerH && y < bodyH) {
+            int col = -1;
+            float cx = numW - scrollX_;
+            for (int c = 0; c < MaxCols(sheet); c++) {
+                float cw = c < (int)grid_.colWidths[s].size() ? grid_.colWidths[s][c] * z : 84 * z;
+                if (x >= cx && x < cx + cw) { col = c; break; }
+                cx += cw;
+            }
+            int row = -1;
+            float ry = headerH - scrollY_;
+            for (size_t r = 1; r < sheet.rows.size(); r++) {
+                float rh = r < grid_.rowHeights[s].size() ? grid_.rowHeights[s][r] * z : 27 * z;
+                if (y >= ry && y < ry + rh) { row = (int)r; break; }
+                ry += rh;
+            }
+            if (col >= 0 && row >= 1) {
+                float cw = col < (int)grid_.colWidths[s].size() ? grid_.colWidths[s][col] * z : 84 * z;
+                float rh = row < (int)grid_.rowHeights[s].size() ? grid_.rowHeights[s][row] * z : 27 * z;
+                copyHover_.active = true;
+                copyHover_.kind = 3;
+                copyHover_.row = row;
+                copyHover_.col = col;
+                copyHover_.rect = { cx + cw - 30, ry + (rh - 20) / 2, 24, 20 };
+                if (copyHover_.rect.y < headerH) copyHover_.rect.y = headerH + 2;
+            }
+        }
+    }
+
+    bool changed = old.active != copyHover_.active || old.block != copyHover_.block ||
+                   old.cellIndex != copyHover_.cellIndex || old.row != copyHover_.row ||
+                   old.col != copyHover_.col || old.rect.x != copyHover_.rect.x ||
+                   old.rect.y != copyHover_.rect.y;
+    if (changed) {
+        // The "copied" tick belongs to the cell that was clicked. Once the
+        // pointer moves to another cell, show the normal copy icon again.
+        ClearCopyFeedback();
+        InvalidateAll();
+    }
+}
+
+void DocView::ClearCopyFeedback() {
+    copyPressed_ = false;
+    copyDone_ = false;
+    if (copyTimer_) {
+        if (hwnd_) KillTimer(hwnd_, 2);
+        copyTimer_ = 0;
+    }
+}
+
+void DocView::DrawCopyButton(Canvas& c) {
+    if (!copyHover_.active) return;
+    c.SetTranslateUi(true);
+    auto& p = c.palette();
+    DRect r = copyHover_.rect;
+    if (r.y < 0 || r.y > c.heightDip() - r.h || r.x < 0 || r.x > c.widthDip() - r.w) return;
+    auto withAlpha = [](Color color, float alpha) {
+        color.a = alpha;
+        return color;
+    };
+    // Keep the chip translucent so cell/code text stays readable underneath.
+    // Pressed is the strongest state and is capped at 60% opacity.
+    Color bg = copyPressed_ ? withAlpha(p.accent, 0.60f)
+                            : (copyDone_ ? withAlpha(p.accentSoft, 0.55f)
+                                         : withAlpha(p.surface, 0.55f));
+    Color border = copyDone_ ? withAlpha(p.accent, 0.60f) : withAlpha(p.border, 0.60f);
+    c.FillRound(r.x, r.y, r.w, r.h, 5, bg);
+    c.StrokeRound(r.x, r.y, r.w, r.h, 5, border);
+    Color fg = copyPressed_ ? HexColor(L"#FFFFFF") : (copyDone_ ? p.accent : p.muted);
+    if (copyDone_)
+        c.DrawIcon(L"\uE73E", r.x, r.y, r.w, r.h, 13, fg);
+    else
+        c.DrawIcon(L"\uE8C8", r.x, r.y, r.w, r.h, 13, fg);
+}
+
+// ---------------------------------------------------------------- input
+int DocView::HitBlock(float x, float y) const {
+    if (!layout_) return -1;
+    for (size_t i = 0; i < layout_->items.size(); i++) {
+        auto& it = layout_->items[i];
+        if (y >= it.y && y <= it.y + it.h && x >= it.x - 20 && x <= it.x + it.w + 20)
+            return (int)i;
+    }
+    return -1;
+}
+
+void DocView::ToggleBlock(int index) {
+    if (!doc_ || index < 0 || index >= (int)doc_->blocks.size()) return;
+    Block& b = doc_->blocks[(size_t)index];
+    if (b.kind != BlockKind::Reasoning && b.kind != BlockKind::Tool) return;
+    if (!b.collapsible) return;
+    b.expanded = !b.expanded;
+    layoutDirty_ = true;
+    RelayoutIfNeeded();
+    InvalidateAll();
+}
+
+void DocView::OpenLink(const std::wstring& url) {
+    if (url.empty() || !doc_) return;
+    if (url[0] == L'#') {
+        std::wstring anchor = url.substr(1);
+        for (size_t i = 0; i < doc_->blocks.size(); i++) {
+            if (_wcsicmp(doc_->blocks[i].anchor.c_str(), anchor.c_str()) == 0) {
+                ScrollToBlock((int)i);
+                return;
+            }
+        }
+        return;
+    }
+    if (IsWebUrl(url)) { OpenExternal(url); return; }
+    std::wstring target = url;
+    if (target.rfind(L"file:///", 0) == 0) target = target.substr(8);
+    if (!(target.size() > 1 && target[1] == L':') && !target.empty() && target[0] != L'\\' && target[0] != L'/')
+        target = PathJoin(PathDir(doc_->path), target);
+    target = ReplaceAll(target, L"/", L"\\");
+    if (FileExists(target)) {
+        DocKind k = DetectKind(target, L"");
+        if (k != DocKind::None) {
+            if (events_.openPath) events_.openPath(target);
+            else OpenExternal(target);
+            return;
+        }
+    }
+    OpenExternal(target);
+}
+
+void DocView::BeginMiddlePan(int px, int py) {
+    if (inkEdit_) InkCommitText();
+    copyHover_ = CopyTarget{};
+    ClearCopyFeedback();
+    float scale = GetDpiForWindow(hwnd_) / 96.0f;
+    panAnchor_.x = panCurrent_.x = (LONG)std::lround(px / scale);
+    panAnchor_.y = panCurrent_.y = (LONG)std::lround(py / scale);
+    middlePan_ = true;
+    SetCapture(hwnd_);
+    if (panTimer_) KillTimer(hwnd_, 1);
+    panTimer_ = 1;
+    SetTimer(hwnd_, 1, 15, nullptr);
+    SetCursor(LoadCursorW(nullptr, IDC_SIZEALL));
+    InvalidateAll();
+}
+
+void DocView::UpdateMiddlePan(int px, int py) {
+    if (!middlePan_) return;
+    float scale = GetDpiForWindow(hwnd_) / 96.0f;
+    panCurrent_.x = (LONG)std::lround(px / scale);
+    panCurrent_.y = (LONG)std::lround(py / scale);
+    InvalidateAll();
+}
+
+void DocView::EndMiddlePan() {
+    if (!middlePan_) return;
+    middlePan_ = false;
+    if (panTimer_) { KillTimer(hwnd_, 1); panTimer_ = 0; }
+    if (GetCapture() == hwnd_) ReleaseCapture();
+    SetCursor(LoadCursorW(nullptr, IDC_ARROW));
+    InvalidateAll();
+}
+
+void DocView::OnMouseDown(int px, int py, bool ctrl) {
+    SetFocus(hwnd_);
+    float scale = GetDpiForWindow(hwnd_) / 96.0f;
+    float x = px / scale, y = py / scale;
+    if (inkMode_) {
+        if (inkEdit_) InkCommitText();
+        bool gridTabStrip = false;
+        if (doc_ && (doc_->kind == DocKind::Csv || doc_->kind == DocKind::Xlsx ||
+                     doc_->kind == DocKind::Xls) && doc_->grid.sheets.size() > 1) {
+            float tabH = 30.0f * (float)zoom_;
+            gridTabStrip = y >= heightDip() - tabH;
+        }
+        if (!gridTabStrip) {
+            int action = 0;
+            bool overUi = inkBarRect_.Contains(x, y) || inkMorePanel_.Contains(x, y) ||
+                          inkSelectionBarRect_.Contains(x, y);
+            if (overUi) {
+                if (InkHitButton(x, y, action) && action) InkAction(action);
+                return;
+            }
+            if (inkMoreOpen_) {
+                inkMoreOpen_ = false;
+                InvalidateAll();
+                return;
+            }
+            if (inkTool_ == INK_TOOL_SELECT) {
+                if (!inkSelection_.empty()) {
+                    float x0, y0, x1, y1;
+                    InkSelectionBounds(x0, y0, x1, y1);
+                    float sx0, sy0, sx1, sy1;
+                    InkContentToScreen(x0, y0, sx0, sy0);
+                    InkContentToScreen(x1, y1, sx1, sy1);
+                    float cx = (sx0 + sx1) / 2;
+                    auto nearHandle = [&](float px, float py) {
+                        return std::abs(x - px) <= 8 && std::abs(y - py) <= 8;
+                    };
+                    if (nearHandle(cx, sy0 - 22)) {
+                        InkSelectBeginDrag(x, y, 3);
+                        return;
+                    }
+                    if (nearHandle(sx0, sy0) || nearHandle(sx1, sy0) ||
+                        nearHandle(sx0, sy1) || nearHandle(sx1, sy1)) {
+                        InkSelectBeginDrag(x, y, 2);
+                        return;
+                    }
+                    if (x >= sx0 && x <= sx1 && y >= sy0 && y <= sy1) {
+                        InkSelectBeginDrag(x, y, 1);
+                        return;
+                    }
+                }
+                bool add = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+                inkLassoing_ = true;
+                inkLassoMoved_ = false;
+                inkLassoAdd_ = add;
+                inkLassoStart_ = { x, y };
+                inkLasso_.clear();
+                inkLasso_.push_back({ x, y });
+                SetCapture(hwnd_);
+                InvalidateAll();
+                return;
+            }
+            if (inkTool_ == INK_TOOL_HIGHLIGHT && CanHighlightPdf()) {
+                pdfHighlighting_ = true;
+                pdfHighlightPage_ = -1;
+                pdfHighlightDragRect_ = { x, y, 0, 0 };
+                pdfHighlightPath_.clear();
+                pdfHighlightPath_.push_back({ x, y });
+                for (int i = 0; i < pdf_->PageCount(); i++) {
+                    float px = 0, py = 0, pw = 0, ph = 0;
+                    if (!PdfPageRect(i, px, py, pw, ph)) continue;
+                    if (x >= px && x <= px + pw && y >= py && y <= py + ph) {
+                        pdfHighlightPage_ = i;
+                        pdfHighlightPageRect_ = { px, py, pw, ph };
+                        break;
+                    }
+                }
+                if (pdfHighlightPage_ >= 0) SetCapture(hwnd_);
+                else pdfHighlighting_ = false;
+                InvalidateAll();
+                return;
+            }
+            InkBegin(x, y);
+            return;
+        }
+    }
+    if (copyHover_.active && CopyHitRect().Contains(x, y)) {
+        std::wstring text;
+        if (copyHover_.kind == 1 && copyHover_.block) text = copyHover_.block->text;
+        else if (copyHover_.kind == 2 && copyHover_.block && layout_) {
+            for (auto& it : layout_->items) {
+                if (it.block == copyHover_.block && copyHover_.cellIndex >= 0 &&
+                    copyHover_.cellIndex < (int)it.cells.size()) {
+                    text = it.cells[(size_t)copyHover_.cellIndex].rt.text;
+                    break;
+                }
+            }
+        } else if (copyHover_.kind == 3 && doc_ && !doc_->grid.sheets.empty()) {
+            int s = std::min(grid_.sheet, (int)doc_->grid.sheets.size() - 1);
+            text = CellString(doc_->grid.sheets[(size_t)s], copyHover_.row, copyHover_.col);
+        }
+        if (!text.empty()) {
+            SetClipboardText(hwnd_, text);
+            copyPressed_ = true;
+            copyDone_ = true;
+            if (copyTimer_) KillTimer(hwnd_, 2);
+            copyTimer_ = 2;
+            SetTimer(hwnd_, 2, 1200, nullptr);
+            InvalidateAll();
+        }
+        return;
+    }
+    mouseDown_ = true;
+    Mode m = Mode::Welcome;
+    if (!errorMessage_.empty()) m = Mode::Error;
+    else if (!doc_) m = Mode::Welcome;
+    else if (sourceMode_) m = Mode::Source;
+    else if (doc_->kind == DocKind::Json) m = Mode::Json;
+    else if (doc_->kind == DocKind::Csv || doc_->kind == DocKind::Xlsx || doc_->kind == DocKind::Xls) m = Mode::Grid;
+    else if (doc_->kind == DocKind::Pdf) m = Mode::Pdf;
+    else if (doc_->kind == DocKind::Image) m = Mode::Image;
+    else m = Mode::Document;
+    if (m == Mode::Welcome) {
+        if (welcomeOpenRect_.Contains(x, y)) {
+            if (events_.openFile) events_.openFile();
+            return;
+        }
+        for (size_t i = 0; i < welcomeRecentRects_.size(); i++) {
+            if (welcomeRecentRects_[i].Contains(x, y) && i < welcomeRecentPaths_.size()) {
+                if (events_.openPath) events_.openPath(welcomeRecentPaths_[i]);
+                return;
+            }
+        }
+        return;
+    }
+    if (m == Mode::Error) {
+        if (errorOpenRect_.Contains(x, y)) { if (events_.openFile) events_.openFile(); return; }
+        if (errorExternalRect_.Contains(x, y)) { OpenExternal(errorPath_); return; }
+        return;
+    }
+    if (m == Mode::Grid && doc_ && !doc_->grid.sheets.empty()) {
+        int s = std::min(grid_.sheet, (int)doc_->grid.sheets.size() - 1);
+        auto& sheet = doc_->grid.sheets[(size_t)s];
+        float z = (float)zoom_;
+        float numW = 52 * z, headerH = 30 * z;
+        float tabH = doc_->grid.sheets.size() > 1 ? 30 * z : 0;
+        float bodyH = heightDip() - tabH;
+        if (tabH > 0 && y >= bodyH) {
+            float tx = 8;
+            for (size_t i = 0; i < doc_->grid.sheets.size(); i++) {
+                std::wstring name = doc_->grid.sheets[i].name.empty() ? L"Sheet" : doc_->grid.sheets[i].name;
+                float tw = name.size() * 7.0f + 28;
+                if (x >= tx && x <= tx + tw) {
+                    grid_.sheet = (int)i;
+                    scrollX_ = scrollY_ = 0;
+                    selectedRow_ = selectedCol_ = -1;
+                    hoverGridColSep_ = hoverGridRowSep_ = -1;
+                    UpdateScrollBars();
+                    InvalidateAll();
+                    return;
+                }
+                tx += tw + 4;
+            }
+            return;
+        }
+        if (y < headerH && x >= numW) {
+            float cx = numW - scrollX_;
+            for (int col = 0; col < MaxCols(sheet); col++) {
+                float cw = col < (int)grid_.colWidths[s].size() ? grid_.colWidths[s][col] * z : 84 * z;
+                if (x >= cx + cw - 6 && x <= cx + cw + 6) {
+                    dragging_ = 1; dragIndex_ = col; dragStart_ = x; dragValue_ = cw / z;
+                    hoverGridColSep_ = col;
+                    hoverGridRowSep_ = -1;
+                    SetCursor(LoadCursorW(nullptr, IDC_SIZEWE));
+                    SetCapture(hwnd_);
+                    return;
+                }
+                cx += cw;
+            }
+            return;
+        }
+        if (x <= numW && y >= headerH) {
+            float ry = headerH - scrollY_;
+            for (size_t r = 1; r < sheet.rows.size(); r++) {
+                float rh = r < grid_.rowHeights[s].size() ? grid_.rowHeights[s][r] * z : 27 * z;
+                if (y >= ry + rh - 4 && y <= ry + rh + 4) {
+                    dragging_ = 2; dragIndex_ = (int)r; dragStart_ = y; dragValue_ = rh / z;
+                    hoverGridRowSep_ = (int)r;
+                    hoverGridColSep_ = -1;
+                    SetCursor(LoadCursorW(nullptr, IDC_SIZENS));
+                    SetCapture(hwnd_);
+                    return;
+                }
+                ry += rh;
+            }
+        }
+        if (x > numW && y > headerH && y < bodyH) {
+            float cx = numW - scrollX_;
+            int col = -1;
+            for (int c = 0; c < MaxCols(sheet); c++) {
+                float cw = c < (int)grid_.colWidths[s].size() ? grid_.colWidths[s][c] * z : 84 * z;
+                if (x >= cx && x < cx + cw) { col = c; break; }
+                cx += cw;
+            }
+            float ry = headerH - scrollY_;
+            int row = -1;
+            for (size_t r = 1; r < sheet.rows.size(); r++) {
+                float rh = r < grid_.rowHeights[s].size() ? grid_.rowHeights[s][r] * z : 27 * z;
+                if (y >= ry && y < ry + rh) { row = (int)r; break; }
+                ry += rh;
+            }
+            if (col >= 0 && row >= 0) {
+                selectedRow_ = row;
+                selectedCol_ = col;
+                InvalidateAll();
+            }
+        }
+        return;
+    }
+    if (m == Mode::Json && json_.built) {
+        float z = (float)zoom_;
+        int row = (int)((y - 16 + scrollY_) / (24 * z));
+        if (row >= 0 && row < (int)json_.rows.size()) {
+            auto& jr = json_.rows[(size_t)row];
+            if (jr.container && !jr.closing && jr.node) {
+                if (json_.collapsed.count(jr.node)) json_.collapsed.erase(jr.node);
+                else json_.collapsed.insert(jr.node);
+                json_.built = false;
+                json_.rows.clear();
+                BuildJson();
+                UpdateScrollBars();
+                InvalidateAll();
+            }
+        }
+        return;
+    }
+    if (m == Mode::Document && doc_ && layout_) {
+        int idx = HitBlock(x, y + scrollY_);
+        if (idx >= 0) {
+            auto& it = layout_->items[(size_t)idx];
+            if (it.main.layout) {
+                DWRITE_HIT_TEST_METRICS hm{};
+                BOOL trailing = FALSE, inside = FALSE;
+                if (SUCCEEDED(it.main.layout->HitTestPoint(x - it.contentX, y + scrollY_ - it.contentY,
+                                                           &trailing, &inside, &hm)) && inside) {
+                    std::wstring url = it.main.LinkAt(hm.textPosition);
+                    if (!url.empty()) { OpenLink(url); return; }
+                }
+            }
+            if (it.block->kind == BlockKind::Reasoning || it.block->kind == BlockKind::Tool) {
+                ToggleBlock(idx);
+                return;
+            }
+        }
+    }
+    (void)ctrl;
+}
+
+void DocView::OnMouseUp(int px, int py) {
+    if (inkLassoing_) {
+        bool moved = inkLassoMoved_;
+        bool add = inkLassoAdd_;
+        InkPoint start = inkLassoStart_;
+        inkLassoing_ = false;
+        if (moved && inkLasso_.size() >= 3) {
+            // The closing segment is only implied after release. If the user
+            // already returned to the starting point, use that loop directly;
+            // otherwise connect the last point to the first before hit-testing.
+            bool closed = false;
+            if (!inkLasso_.empty()) {
+                float dx = inkLasso_.back().x - inkLasso_.front().x;
+                float dy = inkLasso_.back().y - inkLasso_.front().y;
+                closed = dx * dx + dy * dy <= 100.0f;
+            }
+            if (!closed) inkLasso_.push_back(inkLasso_.front());
+            InkSelectLasso(add);
+        } else {
+            InkSelectAt(start.x, start.y, add);
+        }
+        inkLasso_.clear();
+        if (GetCapture() == hwnd_) ReleaseCapture();
+        InvalidateAll();
+        return;
+    }
+    if (inkDragMode_) {
+        InkSelectEndDrag();
+        return;
+    }
+    if (pdfHighlighting_) {
+        float scale = GetDpiForWindow(hwnd_) / 96.0f;
+        float x = px / scale, y = py / scale;
+        float x0 = pdfHighlightDragRect_.x, y0 = pdfHighlightDragRect_.y;
+        FinishPdfHighlight(x0, y0, x, y);
+        return;
+    }
+    if (inkDrawing_ || inkErasing_ || inkShapeDrawing_) {
+        InkEnd();
+        return;
+    }
+    if (dragging_) {
+        ReleaseCapture();
+        dragging_ = 0;
+        dragIndex_ = -1;
+    }
+    if (copyPressed_) {
+        copyPressed_ = false;
+        InvalidateAll();
+    }
+    mouseDown_ = false;
+    (void)px; (void)py;
+}
+
+void DocView::OnMouseMove(int px, int py) {
+    float scale = GetDpiForWindow(hwnd_) / 96.0f;
+    float x = px / scale, y = py / scale;
+    TRACKMOUSEEVENT tme{ sizeof(tme), TME_LEAVE, hwnd_, 0 };
+    TrackMouseEvent(&tme);
+    if (middlePan_) {
+        UpdateMiddlePan(px, py);
+        SetCursor(LoadCursorW(nullptr, IDC_SIZEALL));
+        return;
+    }
+    if (inkMode_) {
+        if (inkLassoing_) {
+            if (!inkLasso_.empty()) {
+                float dx = x - inkLasso_.back().x, dy = y - inkLasso_.back().y;
+                if (dx * dx + dy * dy >= 2.25f) {
+                    inkLasso_.push_back({ x, y });
+                }
+                float sx = x - inkLassoStart_.x, sy = y - inkLassoStart_.y;
+                if (sx * sx + sy * sy >= 25.0f) inkLassoMoved_ = true;
+                if (inkLassoMoved_) InvalidateAll();
+            }
+            SetCursor(LoadCursorW(nullptr, IDC_CROSS));
+            return;
+        }
+        if (inkDragMode_) {
+            InkSelectMoveDrag(x, y);
+            SetCursor(LoadCursorW(nullptr, IDC_SIZEALL));
+            return;
+        }
+        if (pdfHighlighting_) {
+            pdfHighlightDragRect_.w = x - pdfHighlightDragRect_.x;
+            pdfHighlightDragRect_.h = y - pdfHighlightDragRect_.y;
+            if (!pdfHighlightPath_.empty()) {
+                float dx = x - pdfHighlightPath_.back().x;
+                float dy = y - pdfHighlightPath_.back().y;
+                if (dx * dx + dy * dy >= 2.25f) pdfHighlightPath_.push_back({ x, y });
+            }
+            InvalidateAll();
+            SetCursor(LoadCursorW(nullptr, IDC_CROSS));
+            return;
+        }
+        if (inkDrawing_ || inkErasing_ || inkShapeDrawing_) {
+            InkMove(x, y);
+            SetCursor(LoadCursorW(nullptr, IDC_CROSS));
+            return;
+        }
+        int action = 0;
+        bool overBar = inkBarRect_.Contains(x, y) || inkMorePanel_.Contains(x, y) ||
+                       inkSelectionBarRect_.Contains(x, y);
+        if (overBar) InkHitButton(x, y, action);
+        if (action != inkHover_) {
+            inkHover_ = action;
+            InvalidateAll();
+        }
+        if (action) SetCursor(LoadCursorW(nullptr, IDC_HAND));
+        else SetCursor(LoadCursorW(nullptr, overBar ? IDC_ARROW : IDC_CROSS));
+        return;
+    }
+    UpdateCopyHover(x, y);
+    if (copyHover_.active && CopyHitRect().Contains(x, y)) {
+        SetCursor(LoadCursorW(nullptr, IDC_HAND));
+        return;
+    }
+    Mode m = Mode::Welcome;
+    if (!errorMessage_.empty()) m = Mode::Error;
+    else if (!doc_) m = Mode::Welcome;
+    else if (sourceMode_) m = Mode::Source;
+    else if (doc_->kind == DocKind::Json) m = Mode::Json;
+    else if (doc_->kind == DocKind::Csv || doc_->kind == DocKind::Xlsx || doc_->kind == DocKind::Xls) m = Mode::Grid;
+    else if (doc_->kind == DocKind::Pdf) m = Mode::Pdf;
+    else if (doc_->kind == DocKind::Image) m = Mode::Image;
+    else m = Mode::Document;
+
+    if (dragging_ == 1 && doc_ && !doc_->grid.sheets.empty()) {
+        int s = std::min(grid_.sheet, (int)doc_->grid.sheets.size() - 1);
+        if (dragIndex_ >= 0 && dragIndex_ < (int)grid_.colWidths[s].size()) {
+            float z = (float)zoom_;
+            grid_.colWidths[s][dragIndex_] = Clampf(dragValue_ + (x - dragStart_) / z, 40, 800);
+            hoverGridColSep_ = dragIndex_;
+            hoverGridRowSep_ = -1;
+            UpdateScrollBars();
+            InvalidateAll();
+        }
+        SetCursor(LoadCursorW(nullptr, IDC_SIZEWE));
+        return;
+    }
+    if (dragging_ == 2 && doc_ && !doc_->grid.sheets.empty()) {
+        int s = std::min(grid_.sheet, (int)doc_->grid.sheets.size() - 1);
+        if (dragIndex_ >= 0 && dragIndex_ < (int)grid_.rowHeights[s].size()) {
+            float z = (float)zoom_;
+            grid_.rowHeights[s][dragIndex_] = Clampf(dragValue_ + (y - dragStart_) / z, 18, 200);
+            hoverGridRowSep_ = dragIndex_;
+            hoverGridColSep_ = -1;
+            UpdateScrollBars();
+            InvalidateAll();
+        }
+        SetCursor(LoadCursorW(nullptr, IDC_SIZENS));
+        return;
+    }
+
+    if (m == Mode::Welcome) {
+        int hover = -1;
+        for (size_t i = 0; i < welcomeRecentRects_.size(); i++) {
+            if (welcomeRecentRects_[i].Contains(x, y)) {
+                if (i < welcomeRecentRowIndices_.size()) hover = welcomeRecentRowIndices_[i];
+                break;
+            }
+        }
+        if (hover != hoverWelcome_) { hoverWelcome_ = hover; InvalidateAll(); }
+        SetCursor(LoadCursorW(nullptr, welcomeOpenRect_.Contains(x, y) || hover >= 0 ? IDC_HAND : IDC_ARROW));
+    } else if (m == Mode::Document && layout_) {
+        int idx = HitBlock(x, y + scrollY_);
+        std::wstring url;
+        if (idx >= 0) {
+            auto& it = layout_->items[(size_t)idx];
+            if (it.main.layout) {
+                DWRITE_HIT_TEST_METRICS hm{};
+                BOOL trailing = FALSE, inside = FALSE;
+                if (SUCCEEDED(it.main.layout->HitTestPoint(x - it.contentX, y + scrollY_ - it.contentY,
+                                                           &trailing, &inside, &hm)) && inside)
+                    url = it.main.LinkAt(hm.textPosition);
+            }
+        }
+        if (idx != hoverLinkBlock_ || url != hoverLink_) {
+            hoverLinkBlock_ = idx;
+            hoverLink_ = url;
+            InvalidateAll();
+        }
+        SetCursor(LoadCursorW(nullptr, !url.empty() ? IDC_HAND : IDC_ARROW));
+    } else if (m == Mode::Json && json_.built) {
+        float z = (float)zoom_;
+        int row = (int)((y - 16 + scrollY_) / (24 * z));
+        if (row < 0 || row >= (int)json_.rows.size()) row = -1;
+        if (row != hoverJsonRow_) { hoverJsonRow_ = row; InvalidateAll(); }
+        SetCursor(LoadCursorW(nullptr, row >= 0 ? IDC_HAND : IDC_ARROW));
+    } else if (m == Mode::Grid) {
+        int colSep = -1, rowSep = -1;
+        bool hand = false;
+        if (doc_ && !doc_->grid.sheets.empty()) {
+            int s = std::min(grid_.sheet, (int)doc_->grid.sheets.size() - 1);
+            auto& sheet = doc_->grid.sheets[(size_t)s];
+            float z = (float)zoom_;
+            float numW = 52 * z, headerH = 30 * z;
+            float tabH = doc_->grid.sheets.size() > 1 ? 30 * z : 0;
+            float bodyH = heightDip() - tabH;
+            if (tabH > 0 && y >= bodyH) {
+                hand = true;
+            } else if (y < headerH && x >= numW) {
+                float cx = numW - scrollX_;
+                for (int col = 0; col < MaxCols(sheet); col++) {
+                    float cw = col < (int)grid_.colWidths[s].size() ? grid_.colWidths[s][col] * z : 84 * z;
+                    if (x >= cx + cw - 6 && x <= cx + cw + 6) { colSep = col; break; }
+                    cx += cw;
+                }
+            } else if (x <= numW && y >= headerH && y < bodyH) {
+                float ry = headerH - scrollY_;
+                for (size_t r = 1; r < sheet.rows.size(); r++) {
+                    float rh = r < grid_.rowHeights[s].size() ? grid_.rowHeights[s][r] * z : 27 * z;
+                    if (y >= ry + rh - 4 && y <= ry + rh + 4) { rowSep = (int)r; break; }
+                    ry += rh;
+                }
+            }
+        }
+        if (colSep != hoverGridColSep_ || rowSep != hoverGridRowSep_) {
+            hoverGridColSep_ = colSep;
+            hoverGridRowSep_ = rowSep;
+            InvalidateAll();
+        }
+        if (colSep >= 0) SetCursor(LoadCursorW(nullptr, IDC_SIZEWE));
+        else if (rowSep >= 0) SetCursor(LoadCursorW(nullptr, IDC_SIZENS));
+        else SetCursor(LoadCursorW(nullptr, hand ? IDC_HAND : IDC_ARROW));
+    } else if (m == Mode::Grid) {
+        if (hoverGridColSep_ >= 0 || hoverGridRowSep_ >= 0) {
+            hoverGridColSep_ = hoverGridRowSep_ = -1;
+            InvalidateAll();
+        }
+        SetCursor(LoadCursorW(nullptr, IDC_ARROW));
+    } else {
+        SetCursor(LoadCursorW(nullptr, IDC_ARROW));
+    }
+}
+
+void DocView::OnMouseWheel(int delta, bool ctrl, bool shift, float x, float y) {
+    if (inkEdit_) InkCommitText();
+    copyHover_.active = false;
+    hoverGridColSep_ = hoverGridRowSep_ = -1;
+    ClearCopyFeedback();
+    if (ctrl) {
+        if (events_.requestZoom) events_.requestZoom(delta > 0 ? 1 : -1);
+        return;
+    }
+    if (!doc_ && errorMessage_.empty()) {
+        if (welcomeRecentView_.Contains(x, y)) WelcomeScrollRecent(delta);
+        return;
+    }
+    float step = wheelStep_ * kWheelLine * (float)zoom_;
+    if (delta > 0) step = -step;
+    if (shift) scrollX_ = std::max(0.0f, scrollX_ + step);
+    else scrollY_ = std::max(0.0f, scrollY_ + step);
+    UpdateScrollBars();
+    InvalidateAll();
+}
+
+void DocView::OnKeyDown(WPARAM key) {
+    // Customizable application/document shortcuts are handled by MainWindow's
+    // message loop. Only context-local keys remain here.
+    if (inkMode_ && key == VK_ESCAPE) SetInkMode(false);
+}
+
+void DocView::OnCopy() {
+    if (!doc_) return;
+    if (doc_->kind == DocKind::Csv || doc_->kind == DocKind::Xlsx || doc_->kind == DocKind::Xls) {
+        if (!doc_->grid.sheets.empty() && selectedRow_ >= 0 && selectedCol_ >= 0) {
+            int s = std::min(grid_.sheet, (int)doc_->grid.sheets.size() - 1);
+            auto& sheet = doc_->grid.sheets[(size_t)s];
+            SetClipboardText(hwnd_, CellString(sheet, 0, selectedCol_) + L"\n" + CellString(sheet, selectedRow_, selectedCol_));
+            return;
+        }
+    }
+    std::wstring text;
+    if (sourceMode_) text = doc_->text;
+    else if (doc_->kind == DocKind::Json) text = PrettyJson(doc_->json);
+    else text = BlocksPlainText(doc_->blocks);
+    SetClipboardText(hwnd_, text);
+}
+
+void DocView::ScrollToBlock(int index) {
+    if (!doc_ || index < 0 || index >= (int)doc_->blocks.size()) return;
+    RelayoutIfNeeded();
+    if (!layout_ || index >= (int)layout_->items.size()) return;
+    scrollY_ = std::max(0.0f, layout_->items[(size_t)index].y - 20 * (float)zoom_);
+    UpdateScrollBars();
+    InvalidateAll();
+}
+
+void DocView::ScrollToTop() {
+    scrollY_ = 0;
+    scrollX_ = 0;
+    UpdateScrollBars();
+    InvalidateAll();
+}
+
+void DocView::CopySelection() {
+    if (inkMode_ && !inkSelection_.empty()) CopyInkSelection();
+    else OnCopy();
+}
+
+void DocView::ScrollBy(float dx, float dy) {
+    scrollX_ = std::max(0.0f, scrollX_ + dx);
+    scrollY_ = std::max(0.0f, scrollY_ + dy);
+    UpdateScrollBars();
+    InvalidateAll();
+}
+
+void DocView::ScrollPage(int dir) {
+    ScrollBy(0, dir * heightDip() * 0.9f);
+}
+
+void DocView::ScrollHome() {
+    scrollY_ = 0;
+    UpdateScrollBars();
+    InvalidateAll();
+}
+
+void DocView::ScrollEnd() {
+    scrollY_ = 1e9f;
+    UpdateScrollBars();
+    InvalidateAll();
+}
+
+void DocView::ExpandJson(bool expand) {
+    if (!doc_ || doc_->kind != DocKind::Json) return;
+    json_.collapsed.clear();
+    if (!expand) {
+        std::function<void(const JNode&)> add = [&](const JNode& n) {
+            if (n.kind == JKind::Object || n.kind == JKind::Array) {
+                json_.collapsed.insert(&n);
+                for (auto& m : n.members) add(m.second);
+                for (auto& i : n.items) add(i);
+            }
+        };
+        add(doc_->json);
+    }
+    json_.built = false;
+    json_.rows.clear();
+    BuildJson();
+    UpdateScrollBars();
+    InvalidateAll();
+}
+
+void DocView::FocusView() { if (hwnd_) SetFocus(hwnd_); }
+
+LRESULT CALLBACK DocView::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    DocView* self = nullptr;
+    if (msg == WM_NCCREATE) {
+        auto* cs = (CREATESTRUCTW*)lp;
+        self = (DocView*)cs->lpCreateParams;
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)self);
+        self->hwnd_ = hwnd;
+    } else {
+        self = (DocView*)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+    }
+    if (!self) return DefWindowProcW(hwnd, msg, wp, lp);
+    return self->Handle(msg, wp, lp);
+}
+
+LRESULT DocView::Handle(UINT msg, WPARAM wp, LPARAM lp) {
+    switch (msg) {
+    case WM_ERASEBKGND:
+        return 1;
+    case WM_SIZE:
+        layoutDirty_ = true;
+        json_.built = false;
+        source_.wrapWidth = -1.0f;
+        UpdateScrollBars();
+        InvalidateAll();
+        return 0;
+    case WM_PAINT: {
+        PAINTSTRUCT ps{};
+        BeginPaint(hwnd_, &ps);
+        Paint();
+        EndPaint(hwnd_, &ps);
+        return 0;
+    }
+    case WM_VSCROLL: {
+        if (inkEdit_) InkCommitText();
+        copyHover_.active = false;
+        hoverGridColSep_ = hoverGridRowSep_ = -1;
+        ClearCopyFeedback();
+        SCROLLINFO si{};
+        si.cbSize = sizeof(si);
+        si.fMask = SIF_ALL;
+        GetScrollInfo(hwnd_, SB_VERT, &si);
+        int pos = si.nPos;
+        switch (LOWORD(wp)) {
+        case SB_LINEUP: pos -= (int)(wheelStep_ * 30); break;
+        case SB_LINEDOWN: pos += (int)(wheelStep_ * 30); break;
+        case SB_PAGEUP: pos -= (int)si.nPage; break;
+        case SB_PAGEDOWN: pos += (int)si.nPage; break;
+        case SB_THUMBTRACK: pos = si.nTrackPos; break;
+        case SB_TOP: pos = si.nMin; break;
+        case SB_BOTTOM: pos = si.nMax; break;
+        }
+        scrollY_ = (float)std::max(si.nMin, pos);
+        UpdateScrollBars();
+        InvalidateAll();
+        return 0;
+    }
+    case WM_HSCROLL: {
+        if (inkEdit_) InkCommitText();
+        copyHover_.active = false;
+        hoverGridColSep_ = hoverGridRowSep_ = -1;
+        ClearCopyFeedback();
+        SCROLLINFO si{};
+        si.cbSize = sizeof(si);
+        si.fMask = SIF_ALL;
+        GetScrollInfo(hwnd_, SB_HORZ, &si);
+        int pos = si.nPos;
+        switch (LOWORD(wp)) {
+        case SB_LINELEFT: pos -= 60; break;
+        case SB_LINERIGHT: pos += 60; break;
+        case SB_PAGELEFT: pos -= (int)si.nPage; break;
+        case SB_PAGERIGHT: pos += (int)si.nPage; break;
+        case SB_THUMBTRACK: pos = si.nTrackPos; break;
+        }
+        scrollX_ = (float)std::max(0, pos);
+        UpdateScrollBars();
+        InvalidateAll();
+        return 0;
+    }
+    case WM_MBUTTONDOWN:
+        BeginMiddlePan(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
+        return 0;
+    case WM_MBUTTONUP:
+        EndMiddlePan();
+        return 0;
+    case WM_TIMER:
+        if (wp == 1 && middlePan_) {
+            copyHover_.active = false;
+            float dx = (float)(panCurrent_.x - panAnchor_.x);
+            float dy = (float)(panCurrent_.y - panAnchor_.y);
+            float dist = std::sqrt(dx * dx + dy * dy);
+            if (dist > 6.0f) {
+                float speed = std::min(26.0f, 1.0f + (dist - 6.0f) * 0.075f);
+                scrollX_ = std::max(0.0f, scrollX_ + dx / dist * speed);
+                scrollY_ = std::max(0.0f, scrollY_ + dy / dist * speed);
+                UpdateScrollBars();
+                InvalidateAll();
+            }
+        } else if (wp == 2) {
+            copyDone_ = false;
+            copyPressed_ = false;
+            copyTimer_ = 0;
+            InvalidateAll();
+        }
+        return 0;
+    case WM_CAPTURECHANGED:
+        if (middlePan_ && (HWND)lp != hwnd_) EndMiddlePan();
+        if ((inkDrawing_ || inkErasing_ || inkShapeDrawing_) && (HWND)lp != hwnd_) InkEnd();
+        if (inkLassoing_ && (HWND)lp != hwnd_) {
+            inkLassoing_ = false;
+            inkLasso_.clear();
+            InvalidateAll();
+        }
+        return 0;
+    case WM_MOUSEWHEEL: {
+        int delta = GET_WHEEL_DELTA_WPARAM(wp);
+        bool ctrl = (GET_KEYSTATE_WPARAM(wp) & MK_CONTROL) != 0;
+        bool shift = (GET_KEYSTATE_WPARAM(wp) & MK_SHIFT) != 0;
+        POINT pt{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+        ScreenToClient(hwnd_, &pt);
+        float scale = GetDpiForWindow(hwnd_) / 96.0f;
+        OnMouseWheel(delta, ctrl, shift, pt.x / scale, pt.y / scale);
+        return 0;
+    }
+    case WM_LBUTTONDOWN:
+        OnMouseDown(GET_X_LPARAM(lp), GET_Y_LPARAM(lp), (wp & MK_CONTROL) != 0);
+        return 0;
+    case WM_LBUTTONUP:
+        OnMouseUp(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
+        return 0;
+    case WM_MOUSEMOVE:
+        OnMouseMove(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
+        return 0;
+    case WM_MOUSELEAVE:
+        hoverJsonRow_ = -1;
+        hoverWelcome_ = -1;
+        hoverGridColSep_ = hoverGridRowSep_ = -1;
+        hoverLink_.clear();
+        hoverLinkBlock_ = -1;
+        copyHover_.active = false;
+        ClearCopyFeedback();
+        InvalidateAll();
+        return 0;
+    case WM_CTLCOLOREDIT: {
+        HDC dc = (HDC)wp;
+        auto& p = Palette::Get(dark_);
+        SetTextColor(dc, ToColorRef(p.fg));
+        SetBkColor(dc, ToColorRef(p.surface));
+        if (!inkEditBrush_) inkEditBrush_ = CreateSolidBrush(ToColorRef(p.surface));
+        return (LRESULT)inkEditBrush_;
+    }
+    case WM_INK_COMMIT:
+        InkCommitText();
+        return 0;
+    case WM_INK_CANCEL:
+        InkCancelText();
+        return 0;
+    case WM_KEYDOWN:
+        OnKeyDown(wp);
+        return 0;
+    case WM_SETCURSOR:
+        if (LOWORD(lp) == HTCLIENT) return TRUE;
+        break;
+    case WM_GETDLGCODE:
+        return DLGC_WANTARROWS | DLGC_WANTCHARS;
+    }
+    return DefWindowProcW(hwnd_, msg, wp, lp);
+}
