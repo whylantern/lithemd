@@ -4,6 +4,10 @@
 
 编译产物 `dist\lithemd.exe` 约 9 MB（内嵌 PDFium），在 Windows 10 1903+ / Windows 11 上直接双击即可运行。
 
+## 界面
+
+![LitheMD 阅读界面](assets/screenshots/main.png)
+
 ## 为什么是 C++
 
 旧版 LitheMD 是 WPF/.NET Framework 4.8 应用。这个版本把窗口、排版、Markdown、LaTeX、Office 和 PDF 阅读全部迁移到原生 C++：
