@@ -398,9 +398,12 @@ bool Canvas::Begin(HWND hwnd, const Palette& palette, bool clear) {
     if (!dpi) dpi = 96;
     float newScale = dpi / 96.0f;
     if (hwndTarget_ && (w != widthPx_ || h != heightPx_)) {
-        hwndTarget_->Resize(D2D1::SizeU(w, h));
-        widthPx_ = w;
-        heightPx_ = h;
+        if (FAILED(hwndTarget_->Resize(D2D1::SizeU(w, h)))) {
+            Discard();
+        } else {
+            widthPx_ = w;
+            heightPx_ = h;
+        }
     }
     if (!hwndTarget_ || std::abs(newScale - scale_) > 0.001f) {
         if (target_ || hwndTarget_ || wicBitmap_) Discard();
@@ -470,7 +473,11 @@ void Canvas::End() {
     if (!target_ || !drawing_) return;
     drawing_ = false;
     HRESULT hr = target_->EndDraw();
-    if (hr == D2DERR_RECREATE_TARGET) Discard();
+    if (hr == D2DERR_RECREATE_TARGET) {
+        HWND hwnd = hwnd_;
+        Discard();
+        if (hwnd) InvalidateRect(hwnd, nullptr, FALSE);
+    }
 }
 
 void Canvas::Discard() {

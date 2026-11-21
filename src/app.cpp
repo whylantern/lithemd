@@ -192,6 +192,100 @@ std::wstring FitText(Canvas& c, const std::wstring& text, float size, bool bold,
     return L"…";
 }
 
+std::wstring BackgroundConfigDirectory(const Settings& settings) {
+    std::wstring cfg = settings.configPath.empty() ? Settings::ResolveConfigPath() : settings.configPath;
+    return PathDir(cfg);
+}
+
+std::wstring NewBackgroundId() {
+    FILETIME ft{};
+    GetSystemTimeAsFileTime(&ft);
+    uint64_t stamp = ((uint64_t)ft.dwHighDateTime << 32) | ft.dwLowDateTime;
+    static uint64_t sequence = 0;
+    sequence++;
+    uint64_t value = stamp ^ ((uint64_t)GetCurrentProcessId() << 32) ^
+                     (sequence * 0x9E3779B97F4A7C15ull);
+    wchar_t text[32];
+    swprintf(text, 32, L"%016llX", (unsigned long long)value);
+    return text;
+}
+
+std::wstring BackgroundFileNameStem(const std::wstring& path) {
+    std::wstring name = PathName(path);
+    size_t dot = name.find_last_of(L'.');
+    std::wstring stem = dot == std::wstring::npos ? name : name.substr(0, dot);
+    for (auto& c : stem) {
+        if (c < 32 || c == L'<' || c == L'>' || c == L':' || c == L'"' ||
+            c == L'/' || c == L'\\' || c == L'|' || c == L'?' || c == L'*')
+            c = L'_';
+    }
+    while (!stem.empty() && (stem.back() == L' ' || stem.back() == L'.')) stem.pop_back();
+    if (stem.size() > 48) stem.resize(48);
+    while (!stem.empty() && (stem.back() == L' ' || stem.back() == L'.')) stem.pop_back();
+    if (stem.empty()) stem = L"background";
+    return stem;
+}
+
+std::wstring BackgroundFileExtension(const std::wstring& path) {
+    std::wstring ext = PathExt(path);
+    bool valid = ext.size() >= 2 && ext.size() <= 12;
+    for (size_t i = 1; valid && i < ext.size(); i++)
+        if (!((ext[i] >= L'a' && ext[i] <= L'z') || (ext[i] >= L'0' && ext[i] <= L'9')))
+            valid = false;
+    return valid ? ext : L".img";
+}
+
+bool IsManagedBackground(const Settings& settings, const std::wstring& path, const std::wstring& id) {
+    if (path.empty() || id.empty()) return false;
+    std::wstring dir = ToLower(BackgroundConfigDirectory(settings));
+    if (dir.empty() || ToLower(PathDir(path)) != dir) return false;
+    return ToLower(PathName(path)).find(ToLower(id)) != std::wstring::npos;
+}
+
+void DeleteManagedBackground(const Settings& settings, const std::wstring& path, const std::wstring& id) {
+    if (IsManagedBackground(settings, path, id)) DeleteFileW(path.c_str());
+}
+
+bool CopyBackgroundToConfig(Settings& settings, const std::wstring& source, std::wstring& error) {
+    error.clear();
+    if (!FileExists(source)) {
+        error = L"背景图片文件不存在。";
+        return false;
+    }
+    if (!settings.backgroundImage.empty() && !settings.backgroundImageId.empty() &&
+        _wcsicmp(source.c_str(), settings.backgroundImage.c_str()) == 0)
+        return true;
+    std::wstring dir = BackgroundConfigDirectory(settings);
+    if (dir.empty() || !EnsureDir(dir)) {
+        error = L"无法创建背景图片目录。";
+        return false;
+    }
+    std::wstring stem = BackgroundFileNameStem(source);
+    std::wstring ext = BackgroundFileExtension(source);
+    for (int attempt = 0; attempt < 8; attempt++) {
+        std::wstring id = NewBackgroundId();
+        std::wstring target = PathJoin(dir, stem + L"-" + id + ext);
+        if (FileExists(target)) continue;
+        std::wstring part = target + L".part";
+        DeleteFileW(part.c_str());
+        if (!CopyFileW(source.c_str(), part.c_str(), FALSE)) {
+            error = L"无法复制背景图片到配置目录。请检查配置目录写入权限。";
+            return false;
+        }
+        if (!MoveFileExW(part.c_str(), target.c_str(),
+                         MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+            DeleteFileW(part.c_str());
+            error = L"无法保存背景图片副本。";
+            return false;
+        }
+        settings.backgroundImage = target;
+        settings.backgroundImageId = id;
+        return true;
+    }
+    error = L"无法生成唯一的背景图片 ID。";
+    return false;
+}
+
 void SetDarkTitle(HWND hwnd, bool dark) {
     BOOL value = dark ? TRUE : FALSE;
     DwmSetWindowAttribute(hwnd, 20, &value, sizeof(value));
@@ -803,6 +897,7 @@ private:
 
     HWND hwnd_ = nullptr;
     HWND owner_ = nullptr;
+    std::unique_ptr<Canvas> canvas_;
     Settings* settings_ = nullptr;
     ShortcutWindow* shortcutsWin_ = nullptr;
     std::wstring currentFile_;
@@ -817,12 +912,15 @@ private:
     std::set<std::wstring> selectedExts_;
     int hover_ = 0;
     float scrollY_ = 0.0f;
-    float contentHeight_ = 2000.0f;
+    float contentHeight_ = 2010.0f;
     std::wstring notice_;
+    std::wstring pendingBackgroundDeletePath_;
+    std::wstring pendingBackgroundDeleteId_;
 };
 
 void SettingsWindow::Paint() {
-    Canvas c;
+    if (!canvas_) canvas_ = std::make_unique<Canvas>();
+    Canvas& c = *canvas_;
     if (!c.Begin(hwnd_, Palette::Get(settings_->theme))) return;
     c.SetTranslateUi(true);
     auto& p = c.palette();
@@ -1040,10 +1138,15 @@ void SettingsWindow::Paint() {
     for (int i = 0; i < 9; i++)
         AddBtn(70 + i, 104 + i * 52.0f, 1822, 46, 32, anchorLabels[i], anchor == i);
     c.DrawText(L"5% – 60%，默认 15%；位置仅在铺满裁剪时生效", 24, 1866, w - 48, 18, 10.5f, p.muted);
-    c.FillRect(24, 1898, w - 48, 1, p.border);
-    AddBtn(13, 24, 1912, 120, 34, L"恢复默认");
-    AddBtn(14, 152, 1912, 132, 34, L"清空本地数据");
-    AddBtn(15, w - 118, 1912, 94, 34, L"关闭", true);
+    c.DrawText(L"选择后复制到配置目录并生成 ID，原图移动或删除不影响背景", 24, 1884, w - 48, 18, 10.5f, p.muted);
+    c.FillRect(24, 1914, w - 48, 1, p.border);
+    AddBtn(13, 24, 1928, 120, 34, L"恢复默认");
+    AddBtn(14, 152, 1928, 132, 34, L"清空本地数据");
+    AddBtn(15, w - 118, 1928, 94, 34, L"关闭", true);
+    std::wstring footer = std::wstring(L"LitheMD ") + kAppVersion +
+                          L"  ·  MIT License  ·  © 2026 LitheMD";
+    c.DrawText(footer, 24, 1974, w - 48, 18, 10, p.muted, false, false,
+               DWRITE_TEXT_ALIGNMENT_CENTER);
 
     for (auto& r : rects_) {
         if (r.enabled && r.id == hover_) c.FillRound(r.x, r.y, r.w, r.h, 7, p.hover);
@@ -1142,12 +1245,27 @@ void SettingsWindow::Click(int id) {
                         L"LitheMD", MB_OK | MB_ICONWARNING);
             return;
         }
-        settings_->backgroundImage = file;
-        notice_ = L"背景图片已更新。";
+        std::wstring oldPath = settings_->backgroundImage;
+        std::wstring oldId = settings_->backgroundImageId;
+        pendingBackgroundDeletePath_ = oldPath;
+        pendingBackgroundDeleteId_ = oldId;
+        std::wstring copyError;
+        if (!CopyBackgroundToConfig(*settings_, file, copyError)) {
+            pendingBackgroundDeletePath_.clear();
+            pendingBackgroundDeleteId_.clear();
+            MessageBoxW(hwnd_, TranslateUi(copyError).c_str(), L"LitheMD", MB_OK | MB_ICONWARNING);
+            return;
+        }
+        if (_wcsicmp(oldPath.c_str(), settings_->backgroundImage.c_str()) == 0)
+            pendingBackgroundDeletePath_.clear();
+        notice_ = L"背景图片已复制到配置目录。";
         break;
     }
     case 61:
+        pendingBackgroundDeletePath_ = settings_->backgroundImage;
+        pendingBackgroundDeleteId_ = settings_->backgroundImageId;
         settings_->backgroundImage.clear();
+        settings_->backgroundImageId.clear();
         notice_ = L"已清除背景图片。";
         break;
     case 62:
@@ -1259,7 +1377,10 @@ void SettingsWindow::Click(int id) {
         settings_->canvasWidth = 2048;
         settings_->canvasHeight = 2048;
         settings_->canvasDark = false;
+        pendingBackgroundDeletePath_ = settings_->backgroundImage;
+        pendingBackgroundDeleteId_ = settings_->backgroundImageId;
         settings_->backgroundImage.clear();
+        settings_->backgroundImageId.clear();
         settings_->backgroundOpacity = Settings::DefaultBackgroundOpacity;
         settings_->backgroundFit = 0;
         settings_->backgroundAnchor = Settings::DefaultBackgroundAnchor;
@@ -1299,6 +1420,8 @@ void SettingsWindow::Click(int id) {
         if (MessageBoxW(hwnd_, TranslateUi(L"将删除本地配置、最近记录和配置缓存。已打开的文件不会被删除。\n\n是否继续？").c_str(),
                         TranslateUi(L"清空本地数据").c_str(), MB_YESNO | MB_ICONWARNING) != IDYES)
             return;
+        DeleteManagedBackground(*settings_, settings_->backgroundImage,
+                                settings_->backgroundImageId);
         std::wstring localDir = LocalDataDir();
         std::vector<std::wstring> paths = {
             PathJoin(localDir, L"config.json"),
@@ -1322,6 +1445,7 @@ void SettingsWindow::Click(int id) {
         settings_->canvasHeight = 2048;
         settings_->canvasDark = false;
         settings_->backgroundImage.clear();
+        settings_->backgroundImageId.clear();
         settings_->backgroundOpacity = Settings::DefaultBackgroundOpacity;
         settings_->backgroundFit = 0;
         settings_->backgroundAnchor = Settings::DefaultBackgroundAnchor;
@@ -1374,11 +1498,20 @@ void SettingsWindow::Click(int id) {
     default:
         return;
     }
-    if (persist) settings_->Save();
+    if (persist) {
+        bool saved = settings_->Save();
+        if (saved && !pendingBackgroundDeletePath_.empty()) {
+            DeleteManagedBackground(*settings_, pendingBackgroundDeletePath_,
+                                    pendingBackgroundDeleteId_);
+            pendingBackgroundDeletePath_.clear();
+            pendingBackgroundDeleteId_.clear();
+        }
+    }
     if (changed_) changed_();
     if (hwnd_) {
         SetDarkTitle(hwnd_, settings_->dark);
         InvalidateRect(hwnd_, nullptr, FALSE);
+        UpdateWindow(hwnd_);
     }
 }
 
@@ -1696,7 +1829,36 @@ private:
         case WM_SIZE:
             LayoutChildren();
             InvalidateChrome();
+            // Paint chrome and the visible child synchronously. Otherwise the
+            // newly exposed strips can stay black until the next idle paint
+            // while the user is dragging the window edge.
+            RedrawWindow(hwnd_, nullptr, nullptr,
+                         RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN);
+            if (resizeTimer_) KillTimer(hwnd_, resizeTimer_);
+            resizeTimer_ = SetTimer(hwnd_, 1, 16, nullptr);
             return 0;
+        case WM_ENTERSIZEMOVE:
+            return 0;
+        case WM_EXITSIZEMOVE:
+            LayoutChildren();
+            InvalidateChrome();
+            UpdateWindow(hwnd_);
+            if (resizeTimer_) {
+                KillTimer(hwnd_, resizeTimer_);
+                resizeTimer_ = 0;
+            }
+            RedrawWindow(hwnd_, nullptr, nullptr,
+                         RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN);
+            return 0;
+        case WM_TIMER:
+            if (wp == 1) {
+                KillTimer(hwnd_, 1);
+                resizeTimer_ = 0;
+                RedrawWindow(hwnd_, nullptr, nullptr,
+                             RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN);
+                return 0;
+            }
+            break;
         case WM_PAINT: {
             PAINTSTRUCT ps{};
             BeginPaint(hwnd_, &ps);
@@ -2329,30 +2491,44 @@ private:
         int contentBodyY = presentation_ ? 0 : bodyY;
         int contentBodyH = presentation_ ? (int)rc.bottom : bodyH;
 
+        auto setVisible = [](HWND child, bool show) {
+            if (!child) return;
+            bool visible = IsWindowVisible(child) != FALSE;
+            if (visible != show) ShowWindow(child, show ? SW_SHOW : SW_HIDE);
+        };
+        // Do not repaint every tab while the user is dragging the window edge.
+        // Move only the active view; hidden tabs are laid out when activated.
+        int activeW = (split_ && !presentation_) ? contentW / 2 : contentW;
         if (home_) {
-            MoveWindow(home_->hwnd(), contentX, contentBodyY, contentW, contentBodyH, TRUE);
-            ShowWindow(home_->hwnd(), active_ < 0 ? SW_SHOW : SW_HIDE);
+            if (active_ < 0)
+                MoveWindow(home_->hwnd(), contentX, contentBodyY, contentW, contentBodyH, FALSE);
+            setVisible(home_->hwnd(), active_ < 0);
         }
         for (size_t i = 0; i < tabs_.size(); i++) {
-            MoveWindow(tabs_[i].view->hwnd(), contentX, contentBodyY, contentW, contentBodyH, TRUE);
-            ShowWindow(tabs_[i].view->hwnd(), (int)i == active_ ? SW_SHOW : SW_HIDE);
+            if ((int)i == active_ && tabs_[i].view)
+                MoveWindow(tabs_[i].view->hwnd(), contentX, contentBodyY, activeW, contentBodyH, FALSE);
+            if (tabs_[i].view)
+                setVisible(tabs_[i].view->hwnd(), (int)i == active_);
         }
         if (splitView_ && split_ && !presentation_) {
             int leftW = contentW / 2;
             int rightW = contentW - leftW;
-            if (DocView* v = ActiveView()) MoveWindow(v->hwnd(), contentX, contentBodyY, leftW, contentBodyH, TRUE);
-            MoveWindow(splitView_->hwnd(), contentX + leftW, contentBodyY, rightW, contentBodyH, TRUE);
-            ShowWindow(splitView_->hwnd(), SW_SHOW);
+            if (DocView* v = ActiveView())
+                MoveWindow(v->hwnd(), contentX, contentBodyY, leftW, contentBodyH, FALSE);
+            MoveWindow(splitView_->hwnd(), contentX + leftW, contentBodyY, rightW, contentBodyH, FALSE);
+            setVisible(splitView_->hwnd(), true);
         } else if (splitView_) {
-            ShowWindow(splitView_->hwnd(), SW_HIDE);
+            setVisible(splitView_->hwnd(), false);
         }
         if (workspace_.hwnd()) {
-            MoveWindow(workspace_.hwnd(), 0, bodyY, workspaceW, bodyH, TRUE);
-            ShowWindow(workspace_.hwnd(), workspaceShown ? SW_SHOW : SW_HIDE);
+            if (workspaceShown)
+                MoveWindow(workspace_.hwnd(), 0, bodyY, workspaceW, bodyH, FALSE);
+            setVisible(workspace_.hwnd(), workspaceShown);
         }
         if (outline_.hwnd()) {
-            MoveWindow(outline_.hwnd(), contentX + contentW, bodyY, outlineW, bodyH, TRUE);
-            ShowWindow(outline_.hwnd(), outline ? SW_SHOW : SW_HIDE);
+            if (outline)
+                MoveWindow(outline_.hwnd(), contentX + contentW, bodyY, outlineW, bodyH, FALSE);
+            setVisible(outline_.hwnd(), outline);
         }
         if (outline && active && active->Doc()) outline_.SetItems(active->Doc()->outline);
         EnsureActiveTabVisible();
@@ -2431,7 +2607,6 @@ private:
         SetUiLanguage(settings_.uiLanguage);
         settingsWin_ = new SettingsWindow(&settings_, ActivePath(), [this] {
             ApplySettingsToViews();
-            LayoutChildren();
             UpdateTitle();
             InvalidateChrome();
         }, [this] {
@@ -3167,8 +3342,9 @@ private:
     }
 
     void PaintChrome() {
-        Canvas c;
-        if (!c.Begin(hwnd_, Palette::Get(settings_.theme), false)) return;
+        if (!chromeCanvas_) chromeCanvas_ = std::make_unique<Canvas>();
+        Canvas& c = *chromeCanvas_;
+        if (!c.Begin(hwnd_, Palette::Get(settings_.theme), true)) return;
         c.SetTranslateUi(true);
         auto& p = c.palette();
         float w = c.widthDip(), h = c.heightDip();
@@ -3239,6 +3415,8 @@ private:
 
     HINSTANCE inst_ = nullptr;
     HWND hwnd_ = nullptr;
+    UINT_PTR resizeTimer_ = 0;
+    std::unique_ptr<Canvas> chromeCanvas_;
     Settings settings_;
     std::vector<std::wstring> initialFiles_;
     bool openSettings_ = false;

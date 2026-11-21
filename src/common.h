@@ -12,6 +12,8 @@
 #include <vector>
 #include <cstdint>
 
+inline constexpr wchar_t kAppVersion[] = L"2.4.3.0";
+
 // ------------------------------------------------------------------ strings
 std::wstring WideFromUtf8(const std::string& s);
 std::string Utf8FromWide(const std::wstring& s);
@@ -188,6 +190,7 @@ struct Settings {
     std::wstring workspaceRoot;
     bool workspaceVisible = false;
     std::wstring backgroundImage;
+    std::wstring backgroundImageId;
     int backgroundOpacity = 15;
     int backgroundFit = 0; // 0 cover, 1 contain, 2 stretch, 3 tile
     int backgroundAnchor = 4; // 3x3 crop anchor, 4 = center

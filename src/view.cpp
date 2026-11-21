@@ -21,6 +21,15 @@ constexpr float kBaseBody = 16.0f;
 constexpr float kWheelLine = 34.0f;
 constexpr int kWelcomeRecentPage = 8;
 constexpr float kWelcomeRowH = 41.0f;
+constexpr float kHomeMaxW = 920.0f;
+constexpr float kHomeGap = 18.0f;
+constexpr float kHomeHeroTop = 32.0f;
+constexpr float kHomeHeroBottom = 254.0f;
+constexpr float kHomeCardsTop = 270.0f;
+constexpr float kHomeCardHeaderH = 40.0f;
+constexpr float kHomeCardPad = 12.0f;
+constexpr float kHomeCardRowH = 41.0f;
+constexpr float kHomeListViewH = 150.0f;
 
 std::wstring PlainInlines(const std::vector<Inline>& inlines) {
     std::wstring out;
@@ -179,11 +188,12 @@ void DocView::SetSettings(Settings* settings) {
         if (settings_->backgroundImage != backgroundPath_ ||
             opacity != (int)std::lround(backgroundOpacity_ * 100.0f) ||
             fit != backgroundFit_ || anchor != backgroundAnchor_) {
+            bool pathChanged = settings_->backgroundImage != backgroundPath_;
             backgroundPath_ = settings_->backgroundImage;
             backgroundOpacity_ = opacity / 100.0f;
             backgroundFit_ = fit;
             backgroundAnchor_ = anchor;
-            if (canvas_) canvas_->ClearImageCache();
+            if (pathChanged && canvas_) canvas_->ClearImageCache();
             InvalidateAll();
         }
     }
@@ -246,6 +256,7 @@ void DocView::SetRecent(const std::vector<std::wstring>& recent) {
 
 void DocView::SetWorkspaceHistory(const std::vector<std::wstring>& history) {
     workspaces_ = history;
+    welcomeWorkspaceScroll_ = 0;
     InvalidateAll();
 }
 
@@ -256,11 +267,12 @@ void DocView::SetBackground(const std::wstring& path, int opacity, int fit, int 
     if (path == backgroundPath_ && nextOpacity == (int)std::lround(backgroundOpacity_ * 100.0f) &&
         nextFit == backgroundFit_ && nextAnchor == backgroundAnchor_)
         return;
+    bool pathChanged = path != backgroundPath_;
     backgroundPath_ = path;
     backgroundOpacity_ = nextOpacity / 100.0f;
     backgroundFit_ = nextFit;
     backgroundAnchor_ = nextAnchor;
-    if (canvas_) canvas_->ClearImageCache();
+    if (pathChanged && canvas_) canvas_->ClearImageCache();
     InvalidateAll();
 }
 
@@ -1145,6 +1157,10 @@ void DocView::UpdateScrollBars() {
             totalW = std::max(viewW, dw + 64.0f);
             totalH = std::max(viewH, dh + 64.0f);
         }
+    } else if (m == Mode::Welcome) {
+        WelcomeMetrics wm = ComputeWelcomeMetrics(viewW, viewH);
+        totalH = wm.contentH;
+        totalW = viewW;
     }
     float maxY = std::max(0.0f, totalH - viewH);
     float maxX = std::max(0.0f, totalW - viewW);
@@ -1412,6 +1428,8 @@ float DocView::ContentHeightDip() {
     else if (doc_->kind == DocKind::Image) m = Mode::Image;
     else m = Mode::Document;
     float viewH = heightDip();
+    if (m == Mode::Welcome)
+        return std::max(viewH, ComputeWelcomeMetrics(PageWidth(), viewH).contentH);
     if (m == Mode::Document) {
         if (layoutDirty_ || !layout_) RelayoutIfNeeded();
         return layout_ ? std::max(viewH, layout_->height + 20.0f) : viewH;
@@ -1460,9 +1478,39 @@ float DocView::ContentHeightDip() {
     return viewH;
 }
 
+DocView::WelcomeMetrics DocView::ComputeWelcomeMetrics(float viewW, float viewH) const {
+    WelcomeMetrics m;
+    m.contentW = std::min(kHomeMaxW, std::max(320.0f, viewW - 48.0f));
+    m.viewX = (viewW - m.contentW) * 0.5f;
+    m.compactHero = viewH < 600.0f;
+    m.heroTop = m.compactHero ? 20.0f : kHomeHeroTop;
+    m.heroBottom = m.compactHero ? 204.0f : kHomeHeroBottom;
+    m.cardsTop = m.compactHero ? 218.0f : kHomeCardsTop;
+    m.twoCol = m.contentW >= 760.0f;
+
+    float recentBody = recent_.empty() ? 46.0f : kHomeListViewH;
+    m.recentH = kHomeCardHeaderH + recentBody + kHomeCardPad;
+    float workspaceBody = workspaces_.empty() ? 46.0f : kHomeListViewH;
+    m.workspaceH = kHomeCardHeaderH + workspaceBody + kHomeCardPad;
+
+    if (m.twoCol) {
+        m.recentW = (m.contentW - kHomeGap) * 0.5f;
+        m.workspaceW = m.recentW;
+        m.recentX = m.viewX;
+        m.workspaceX = m.recentX + m.recentW + kHomeGap;
+        m.contentH = m.cardsTop + std::max(m.recentH, m.workspaceH) + 70.0f;
+    } else {
+        m.recentX = m.workspaceX = m.viewX;
+        m.recentW = m.workspaceW = m.contentW;
+        m.contentH = m.cardsTop + m.recentH + kHomeGap + m.workspaceH + 70.0f;
+    }
+    return m;
+}
+
 void DocView::WelcomeResetRecentPaging() {
     welcomeRecentShown_ = std::min((int)recent_.size(), kWelcomeRecentPage);
     welcomeRecentScroll_ = 0;
+    scrollY_ = 0;
     hoverWelcome_ = -1;
 }
 
@@ -1478,11 +1526,23 @@ void DocView::WelcomeScrollRecent(int delta) {
         welcomeRecentShown_ < (int)recent_.size()) {
         welcomeRecentShown_ = std::min((int)recent_.size(),
                                        welcomeRecentShown_ + kWelcomeRecentPage);
-        float newContentH = welcomeRecentShown_ * kWelcomeRowH + 30.0f;
+        // The exact height depends on wrapped directory lines; keep the scroll
+        // near the bottom and let the next paint clamp it precisely.
+        welcomeRecentContentH_ += kWelcomeRecentPage * 38.0f;
         welcomeRecentScroll_ = std::min(welcomeRecentScroll_ + 18.0f,
-                                        std::max(0.0f, newContentH - viewH));
+                                        std::max(0.0f, welcomeRecentContentH_ - viewH));
     }
     hoverWelcome_ = -1;
+    hoverWorkspace_ = -1;
+    InvalidateAll();
+}
+
+void DocView::WelcomeScrollWorkspace(int delta) {
+    if (workspaces_.empty() || delta == 0) return;
+    float viewH = std::max(1.0f, welcomeWorkspaceView_.h);
+    float maxScroll = std::max(0.0f, welcomeWorkspaceContentH_ - viewH);
+    float step = delta / 120.0f * 60.0f;
+    welcomeWorkspaceScroll_ = Clampf(welcomeWorkspaceScroll_ - step, 0, maxScroll);
     hoverWorkspace_ = -1;
     InvalidateAll();
 }
@@ -1490,216 +1550,219 @@ void DocView::WelcomeScrollRecent(int delta) {
 void DocView::PaintWelcome(Canvas& c) {
     c.SetTranslateUi(true);
     float w = c.widthDip(), h = c.heightDip();
-    float cx = w / 2;
-    bool compact = h < 600.0f;
-    float top = compact ? 12.0f : std::max(20.0f, (h - 560.0f) / 2);
-    if (top > 120) top = 120;
-
-    float logoSize = compact ? 52.0f : 76.0f;
-    c.FillRound(cx - logoSize / 2, top, logoSize, logoSize, compact ? 12.0f : 16.0f,
-                c.palette().accentSoft);
-    c.DrawText(L"md", cx - logoSize / 2, top + (compact ? 5.0f : 8.0f), logoSize,
-               compact ? 42.0f : 60.0f, compact ? 22.0f : 34.0f, c.palette().accent, true, false,
-               DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-    c.DrawText(L"LitheMD", cx - 200, top + (compact ? 60.0f : 92.0f), 400,
-               compact ? 30.0f : 42.0f, compact ? 24.0f : 32.0f, c.palette().fg, true, false,
-               DWRITE_TEXT_ALIGNMENT_CENTER);
-
-    float btnW = compact ? 160.0f : 180.0f;
-    float btnH = compact ? 36.0f : 42.0f;
-    float btnX = cx - btnW / 2, btnY = top + (compact ? 96.0f : 174.0f);
-    welcomeOpenRect_ = { btnX, btnY, btnW, btnH };
-    welcomeFolderRect_ = DRect{};
-    c.FillRound(btnX, btnY, btnW, btnH, 8, c.palette().accent);
-    c.DrawText(L"打开", btnX, btnY + 1, btnW - 18, btnH - 2, compact ? 13.0f : 14.0f,
-               HexColor(L"#FFFFFF"), true, false, DWRITE_TEXT_ALIGNMENT_CENTER,
-               DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-    c.DrawIcon(L"\uE70D", btnX + btnW - 30, btnY + (btnH - 14) / 2, 14, 14, 9,
-               HexColor(L"#FFFFFF"));
-    float rowW = std::min(compact ? 720.0f : 560.0f, std::max(240.0f, w - 40.0f));
-    float viewX = cx - rowW / 2;
-    bool showHint = !compact && h >= 620.0f;
-    bool showChips = !compact && h >= 680.0f;
-    if (showHint) {
-        c.DrawText(L"Ctrl+O 打开文件   ·   Ctrl+Shift+O 打开文件夹   ·   Ctrl+L 输入路径",
-                   cx - std::min(360.0f, rowW / 2), btnY + 50, std::min(720.0f, rowW), 22, 12,
-                   c.palette().muted, false, false, DWRITE_TEXT_ALIGNMENT_CENTER);
-    }
-
-    float contentBottom = btnY + btnH;
-    if (showHint) contentBottom = btnY + 72.0f;
-    if (showChips) {
-        std::vector<std::wstring> chips = { L"Markdown", L"JSON", L"Notebook", L"CSV", L"PDF", L"Word", L"Excel", L"纯文本" };
-        float chipH = 24, gap = 8;
-        std::vector<float> widths;
-        for (auto& s : chips) widths.push_back(c.MeasureText(s, 11.5f, false, false, 500, false) + 22);
-        std::vector<std::vector<size_t>> rows;
-        std::vector<float> rowWidths;
-        for (size_t i = 0; i < chips.size(); i++) {
-            if (rows.empty() || rowWidths.back() + gap + widths[i] > rowW) {
-                rows.push_back({});
-                rowWidths.push_back(0);
-            }
-            if (!rows.back().empty()) rowWidths.back() += gap;
-            rows.back().push_back(i);
-            rowWidths.back() += widths[i];
-        }
-        float chipY = btnY + 92.0f;
-        for (size_t r = 0; r < rows.size(); r++) {
-            float chipX = cx - rowWidths[r] / 2;
-            for (size_t index : rows[r]) {
-                c.StrokeRound(chipX, chipY, widths[index], chipH, 12, c.palette().border);
-                c.DrawText(chips[index], chipX, chipY + 1, widths[index], chipH - 2, 11.5f,
-                           c.palette().muted, false, false, DWRITE_TEXT_ALIGNMENT_CENTER,
-                           DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-                chipX += widths[index] + gap;
-            }
-            chipY += chipH + gap;
-        }
-        contentBottom = chipY - gap;
-    }
-    float listHeaderTop = contentBottom + (compact ? 18.0f : 30.0f);
+    if (welcomeRecentShown_ <= 0 && !recent_.empty())
+        welcomeRecentShown_ = std::min((int)recent_.size(), kWelcomeRecentPage);
+    auto m = ComputeWelcomeMetrics(w, h);
+    float maxScroll = std::max(0.0f, m.contentH - h);
+    scrollY_ = Clampf(scrollY_, 0.0f, maxScroll);
 
     welcomeRecentRects_.clear();
     welcomeRecentDeleteRects_.clear();
     welcomeRecentPaths_.clear();
     welcomeRecentRowIndices_.clear();
     welcomeRecentView_ = DRect{};
+    welcomeWorkspaceView_ = DRect{};
+    welcomeRecentCard_ = DRect{};
+    welcomeWorkspaceCard_ = DRect{};
     welcomeClearRect_ = DRect{};
+    welcomeMoreRect_ = DRect{};
     welcomeRecentContentH_ = 0;
+    welcomeWorkspaceContentH_ = 0;
     welcomeWorkspaceRects_.clear();
     welcomeWorkspacePaths_.clear();
     welcomeWorkspaceClearRect_ = DRect{};
-    const float wsRowH = 34.0f;
-    const float wsHeaderH = 24.0f;
-    const float bottom = h - 16.0f;
-    const float listTop = listHeaderTop + 28.0f;
-    const float minRecentH = 36.0f;
-    int wsShown = std::min<int>(3, (int)workspaces_.size());
-    auto workspaceHeight = [&](int count) {
-        return wsHeaderH + count * wsRowH + 8.0f;
-    };
-    bool twoColumn = compact && w >= 560.0f && !recent_.empty() && !workspaces_.empty();
-    float columnGap = 16.0f;
-    float recentX = viewX, recentW = rowW;
-    float workspaceX = viewX, workspaceW = rowW;
-    if (twoColumn) {
-        recentW = (rowW - columnGap) / 2;
-        workspaceW = recentW;
-        workspaceX = viewX + recentW + columnGap;
-    }
-    bool showWorkspace = false;
-    bool showRecent = false;
-    float wsTop = bottom;
-    float recentBottom = bottom;
-    if (twoColumn) {
-        while (wsShown > 0 && listHeaderTop + workspaceHeight(wsShown) > bottom) wsShown--;
-        showWorkspace = wsShown > 0;
-        showRecent = !recent_.empty() && bottom - listTop >= minRecentH;
-        wsTop = listHeaderTop;
-        recentBottom = bottom;
-    } else {
-        while (wsShown > 0 && !recent_.empty() &&
-               bottom - workspaceHeight(wsShown) - 10.0f - listTop < minRecentH)
-            wsShown--;
-        showWorkspace = wsShown > 0;
-        wsTop = showWorkspace ? bottom - workspaceHeight(wsShown) : bottom;
-        recentBottom = showWorkspace ? wsTop - 10.0f : bottom;
-        showRecent = !recent_.empty() && recentBottom - listTop >= minRecentH;
-    }
-    if (showRecent) {
-        if (welcomeRecentShown_ <= 0)
-            welcomeRecentShown_ = std::min((int)recent_.size(), kWelcomeRecentPage);
-        welcomeRecentShown_ = std::min(welcomeRecentShown_, (int)recent_.size());
-        c.DrawText(L"最近打开", recentX, listHeaderTop, std::max(40.0f, recentW - 58), 22, 12,
-                   c.palette().muted, true);
-        welcomeClearRect_ = { recentX + recentW - 52, listHeaderTop - 2, 52, 22 };
-        c.DrawText(L"清空", welcomeClearRect_.x, welcomeClearRect_.y, welcomeClearRect_.w, welcomeClearRect_.h,
-                   11, c.palette().muted, false, false,
-                   DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-        float viewTop = listTop;
-        float viewH = recentBottom - viewTop;
-        welcomeRecentView_ = { recentX, viewTop, recentW, viewH };
-        welcomeRecentContentH_ = welcomeRecentShown_ * kWelcomeRowH + 30.0f;
-        float maxScroll = std::max(0.0f, welcomeRecentContentH_ - viewH);
-        welcomeRecentScroll_ = Clampf(welcomeRecentScroll_, 0, maxScroll);
 
-        c.PushClip(recentX - 2, viewTop - 2, recentW + 4, viewH + 4);
-        for (int i = 0; i < welcomeRecentShown_; i++) {
-            float rowY = viewTop + i * kWelcomeRowH - welcomeRecentScroll_;
-            if (rowY + 38 < viewTop || rowY > viewTop + viewH) continue;
-            DRect r{ recentX, rowY, recentW, 38 };
-            if (hoverWelcome_ == i) c.FillRound(r.x, r.y, r.w, r.h, 6, c.palette().hover);
-            const std::wstring& p = recent_[(size_t)i];
-            bool exists = FileExists(p);
-            c.DrawText(PathName(p), r.x + 12, r.y + 3, r.w - 58, 19, 12.5f,
-                       exists ? c.palette().fg : c.palette().muted, true, false,
-                       DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_NEAR, false);
-            c.DrawText(PathDir(p), r.x + 12, r.y + 20, r.w - 58, 16, 10.5f, c.palette().muted, false, false,
-                       DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_NEAR, false);
-            DRect del{ r.x + r.w - 30, r.y + 8, 22, 22 };
+    c.PushClip(0, 0, w, h);
+    c.SetTransform(0, -scrollY_);
+
+    auto& p = c.palette();
+    float cx = w * 0.5f;
+    bool tight = m.compactHero;
+    float logo = tight ? 52.0f : 64.0f;
+    float titleY = m.heroTop + (tight ? 58.0f : 72.0f);
+    float titleH = tight ? 30.0f : 38.0f;
+    float titleSize = tight ? 24.0f : 30.0f;
+    float subY = m.heroTop + (tight ? 90.0f : 110.0f);
+    float subSize = tight ? 10.5f : 11.5f;
+    c.FillRound(cx - logo / 2, m.heroTop, logo, logo, tight ? 12.0f : 14.0f, p.accentSoft);
+    c.DrawText(L"md", cx - logo / 2, m.heroTop + (tight ? 5.0f : 7.0f), logo,
+               tight ? 40.0f : 48.0f, tight ? 19.0f : 22.0f, p.accent, true, false,
+               DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+    c.DrawText(L"LitheMD", cx - 240, titleY, 480, titleH, titleSize, p.fg, true, false,
+               DWRITE_TEXT_ALIGNMENT_CENTER);
+    c.DrawText(L"轻量本地文档阅读器", cx - 240, subY, 480, tight ? 16.0f : 18.0f, subSize,
+               p.muted, false, false, DWRITE_TEXT_ALIGNMENT_CENTER);
+
+    float btnW = tight ? 160.0f : 180.0f;
+    float btnH = tight ? 38.0f : 42.0f;
+    float btnX = cx - btnW / 2, btnY = m.heroTop + (tight ? 112.0f : 144.0f);
+    welcomeOpenRect_ = { btnX, btnY, btnW, btnH };
+    welcomeFolderRect_ = DRect{};
+    c.FillRound(btnX, btnY, btnW, btnH, 8, p.accent);
+    c.DrawText(L"打开", btnX, btnY + 1, btnW - 18, btnH - 2, tight ? 13.0f : 14.0f,
+               HexColor(L"#FFFFFF"), true, false, DWRITE_TEXT_ALIGNMENT_CENTER,
+               DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+    c.DrawIcon(L"\uE70D", btnX + btnW - 30, btnY + (btnH - 14) / 2, 14, 14, 9,
+               HexColor(L"#FFFFFF"));
+    c.DrawText(L"Ctrl+O 打开文件   ·   Ctrl+Shift+O 打开文件夹   ·   Ctrl+L 输入路径",
+               cx - std::min(360.0f, m.contentW / 2), m.heroTop + (tight ? 158.0f : 196.0f),
+               std::min(720.0f, m.contentW), tight ? 16.0f : 18.0f, tight ? 10.5f : 11.5f,
+               p.muted, false, false, DWRITE_TEXT_ALIGNMENT_CENTER);
+
+    auto drawCard = [&](float x, float y, float cw, float ch, const std::wstring& title,
+                        DRect& clearRect, bool showClear) {
+        c.FillRound(x, y, cw, ch, 12, p.surface);
+        c.StrokeRound(x, y, cw, ch, 12, p.border);
+        c.DrawText(title, x + 16, y + 9, std::max(40.0f, cw - 80), 22, 12.5f, p.fg, true);
+        c.FillRect(x + 16, y + kHomeCardHeaderH - 1, std::max(0.0f, cw - 32), 1, p.border);
+        clearRect = DRect{};
+        if (showClear) {
+            clearRect = { x + cw - 58, y + 8, 46, 24 };
+            c.DrawText(L"清空", clearRect.x, clearRect.y, clearRect.w, clearRect.h, 11,
+                       p.muted, false, false, DWRITE_TEXT_ALIGNMENT_CENTER,
+                       DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+        }
+    };
+
+    float cardY = m.cardsTop;
+    welcomeRecentCard_ = { m.recentX, cardY, m.recentW, m.recentH };
+    drawCard(m.recentX, cardY, m.recentW, m.recentH, L"最近打开", welcomeClearRect_,
+             !recent_.empty());
+    welcomeRecentView_ = { m.recentX + 8, cardY + kHomeCardHeaderH,
+                           std::max(40.0f, m.recentW - 16), kHomeListViewH };
+    if (recent_.empty()) {
+        welcomeRecentView_ = DRect{};
+        c.DrawText(L"打开一个文件后，最近记录会显示在这里。", m.recentX + 16,
+                   cardY + kHomeCardHeaderH + 12, std::max(40.0f, m.recentW - 32), 34,
+                   11.5f, p.muted, false, false, DWRITE_TEXT_ALIGNMENT_CENTER);
+    } else {
+        int page = welcomeRecentShown_ > 0 ? welcomeRecentShown_ : kWelcomeRecentPage;
+        int shown = std::min((int)recent_.size(), page);
+        welcomeRecentShown_ = shown;
+        std::vector<float> heights((size_t)shown, 38.0f);
+        float textW = std::max(20.0f, welcomeRecentView_.w - 58.0f);
+        welcomeRecentContentH_ = 8.0f;
+        for (int i = 0; i < shown; i++) {
+            bool wrap = c.MeasureText(PathDir(recent_[(size_t)i]), 10.5f, false, false,
+                                      textW, false) > textW;
+            heights[(size_t)i] = wrap ? 54.0f : 38.0f;
+            welcomeRecentContentH_ += heights[(size_t)i];
+        }
+        float maxScroll = std::max(0.0f, welcomeRecentContentH_ - welcomeRecentView_.h);
+        welcomeRecentScroll_ = Clampf(welcomeRecentScroll_, 0.0f, maxScroll);
+        c.PushClip(welcomeRecentView_.x, welcomeRecentView_.y, welcomeRecentView_.w,
+                   welcomeRecentView_.h);
+        float y = welcomeRecentView_.y + 4 - welcomeRecentScroll_;
+        for (int i = 0; i < shown; i++) {
+            float rowH = heights[(size_t)i];
+            DRect r{ welcomeRecentView_.x + 4, y, welcomeRecentView_.w - 8, rowH };
+            if (r.y + r.h < welcomeRecentView_.y || r.y > welcomeRecentView_.y + welcomeRecentView_.h) {
+                y += rowH;
+                continue;
+            }
+            if (hoverWelcome_ == i) c.FillRound(r.x, r.y, r.w, r.h, 6, p.hover);
+            const std::wstring& path = recent_[(size_t)i];
+            bool exists = FileExists(path);
+            float nameW = std::max(20.0f, r.w - 50.0f);
+            c.DrawText(PathName(path), r.x + 8, r.y + 2, nameW, 19, 12.5f,
+                       exists ? p.fg : p.muted, true, false, DWRITE_TEXT_ALIGNMENT_LEADING,
+                       DWRITE_PARAGRAPH_ALIGNMENT_NEAR, false);
+            c.DrawText(PathDir(path), r.x + 8, r.y + 20, nameW, rowH > 40 ? 30.0f : 16.0f,
+                       10.5f, p.muted, false, false, DWRITE_TEXT_ALIGNMENT_LEADING,
+                       DWRITE_PARAGRAPH_ALIGNMENT_NEAR, true);
+            DRect del{ r.x + r.w - 28, r.y + (rowH - 22) * 0.5f, 22, 22 };
             if (hoverWelcome_ == i) {
-                c.FillRound(del.x, del.y, del.w, del.h, 4, c.palette().hover);
-                c.DrawText(L"×", del.x, del.y - 1, del.w, del.h, 14.0f, c.palette().muted, false, false,
+                c.FillRound(del.x, del.y, del.w, del.h, 4, p.hover);
+                c.DrawText(L"×", del.x, del.y - 1, del.w, del.h, 14.0f, p.muted, false, false,
                            DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, false);
             }
             welcomeRecentRects_.push_back(r);
             welcomeRecentDeleteRects_.push_back(del);
-            welcomeRecentPaths_.push_back(p);
+            welcomeRecentPaths_.push_back(path);
             welcomeRecentRowIndices_.push_back(i);
-        }
-        float footerY = viewTop + welcomeRecentShown_ * kWelcomeRowH - welcomeRecentScroll_;
-        bool more = welcomeRecentShown_ < (int)recent_.size();
-        if (footerY + 30 >= viewTop && footerY <= viewTop + viewH) {
-            c.DrawText(more ? L"继续向下滑动加载更多" : L"已加载全部最近记录",
-                       recentX, footerY + 5, recentW, 20, 10.5f, c.palette().muted, false, false,
-                       DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_NEAR, false);
+            y += rowH;
         }
         c.PopClip();
-
-        if (welcomeRecentContentH_ > viewH) {
-            float trackX = std::min(recentX + recentW + 6, w - 8);
-            Color track = c.palette().border;
-            track.a = 0.45f;
-            c.FillRound(trackX, viewTop, 3, viewH, 1.5f, track);
-            float thumbH = std::max(28.0f, viewH * viewH / welcomeRecentContentH_);
-            float thumbY = viewTop;
-            if (maxScroll > 0.5f)
-                thumbY += welcomeRecentScroll_ / maxScroll * (viewH - thumbH);
-            Color thumb = c.palette().muted;
-            thumb.a = 0.55f;
-            c.FillRound(trackX, thumbY, 3, thumbH, 1.5f, thumb);
-        }
-    } else if (bottom - listHeaderTop >= 24.0f) {
-        c.DrawText(L"打开一个文件后，最近记录会显示在这里。", recentX, listHeaderTop, recentW, 22, 12,
-                   c.palette().muted, false, false, DWRITE_TEXT_ALIGNMENT_CENTER);
     }
 
-    if (showWorkspace) {
-        c.FillRect(workspaceX, wsTop - 8, workspaceW, 1, c.palette().border);
-        c.DrawText(L"最近工作区", workspaceX, wsTop, std::max(40.0f, workspaceW - 58), 22, 12,
-                   c.palette().muted, true);
-        welcomeWorkspaceClearRect_ = { workspaceX + workspaceW - 52, wsTop - 2, 52, 22 };
-        c.DrawText(L"清空", welcomeWorkspaceClearRect_.x, welcomeWorkspaceClearRect_.y,
-                   welcomeWorkspaceClearRect_.w, welcomeWorkspaceClearRect_.h, 11,
-                   c.palette().muted, false, false,
-                   DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-        for (int i = 0; i < wsShown; i++) {
-            float y = wsTop + wsHeaderH + i * wsRowH;
-            DRect r{ workspaceX, y, workspaceW, 32 };
-            if (hoverWorkspace_ == i) c.FillRound(r.x, r.y, r.w, r.h, 6, c.palette().hover);
-            const std::wstring& p = workspaces_[(size_t)i];
-            bool exists = DirExists(p);
-            c.DrawText(PathName(p), r.x + 12, r.y + 1, r.w - 24, 18, 12.0f,
-                       exists ? c.palette().fg : c.palette().muted, true, false,
-                       DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_NEAR, false);
-            c.DrawText(PathDir(p), r.x + 12, r.y + 17, r.w - 24, 14, 10.0f,
-                       c.palette().muted, false, false,
-                       DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_NEAR, false);
+    float workspaceY = m.twoCol ? cardY : cardY + m.recentH + kHomeGap;
+    welcomeWorkspaceCard_ = { m.workspaceX, workspaceY, m.workspaceW, m.workspaceH };
+    drawCard(m.workspaceX, workspaceY, m.workspaceW, m.workspaceH, L"最近工作区",
+             welcomeWorkspaceClearRect_, !workspaces_.empty());
+    welcomeWorkspaceView_ = { m.workspaceX + 8, workspaceY + kHomeCardHeaderH,
+                              std::max(40.0f, m.workspaceW - 16), kHomeListViewH };
+    if (workspaces_.empty()) {
+        welcomeWorkspaceView_ = DRect{};
+        c.DrawText(L"打开文件夹后，最近工作区会显示在这里。", m.workspaceX + 16,
+                   workspaceY + kHomeCardHeaderH + 12, std::max(40.0f, m.workspaceW - 32),
+                   34, 11.5f, p.muted, false, false, DWRITE_TEXT_ALIGNMENT_CENTER);
+    } else {
+        int count = (int)workspaces_.size();
+        std::vector<float> heights((size_t)count, 38.0f);
+        float textW = std::max(20.0f, welcomeWorkspaceView_.w - 24.0f);
+        welcomeWorkspaceContentH_ = 8.0f;
+        for (int i = 0; i < count; i++) {
+            bool wrap = c.MeasureText(PathDir(workspaces_[(size_t)i]), 10.5f, false, false,
+                                      textW, false) > textW;
+            heights[(size_t)i] = wrap ? 54.0f : 38.0f;
+            welcomeWorkspaceContentH_ += heights[(size_t)i];
+        }
+        float maxScroll = std::max(0.0f, welcomeWorkspaceContentH_ - welcomeWorkspaceView_.h);
+        welcomeWorkspaceScroll_ = Clampf(welcomeWorkspaceScroll_, 0.0f, maxScroll);
+        c.PushClip(welcomeWorkspaceView_.x, welcomeWorkspaceView_.y, welcomeWorkspaceView_.w,
+                   welcomeWorkspaceView_.h);
+        float y = welcomeWorkspaceView_.y + 4 - welcomeWorkspaceScroll_;
+        for (int i = 0; i < count; i++) {
+            float rowH = heights[(size_t)i];
+            DRect r{ welcomeWorkspaceView_.x + 4, y, welcomeWorkspaceView_.w - 8, rowH };
+            if (r.y + r.h < welcomeWorkspaceView_.y || r.y > welcomeWorkspaceView_.y + welcomeWorkspaceView_.h) {
+                y += rowH;
+                continue;
+            }
+            if (hoverWorkspace_ == i) c.FillRound(r.x, r.y, r.w, r.h, 6, p.hover);
+            const std::wstring& path = workspaces_[(size_t)i];
+            bool exists = DirExists(path);
+            float textW2 = std::max(20.0f, r.w - 16.0f);
+            c.DrawText(PathName(path), r.x + 8, r.y + 2, textW2, 19, 12.5f,
+                       exists ? p.fg : p.muted, true, false, DWRITE_TEXT_ALIGNMENT_LEADING,
+                       DWRITE_PARAGRAPH_ALIGNMENT_NEAR, false);
+            c.DrawText(PathDir(path), r.x + 8, r.y + 20, textW2, rowH > 40 ? 30.0f : 16.0f,
+                       10.5f, p.muted, false, false, DWRITE_TEXT_ALIGNMENT_LEADING,
+                       DWRITE_PARAGRAPH_ALIGNMENT_NEAR, true);
             welcomeWorkspaceRects_.push_back(r);
-            welcomeWorkspacePaths_.push_back(p);
+            welcomeWorkspacePaths_.push_back(path);
+            y += rowH;
         }
+        c.PopClip();
     }
+
+    auto drawListScroll = [&](const DRect& view, float contentH, float scroll) {
+        if (view.w < 8 || view.h < 8 || contentH <= view.h + 0.5f) return;
+        float trackX = view.x + view.w + 2;
+        Color track = p.border;
+        track.a = 0.45f;
+        c.FillRound(trackX, view.y, 3, view.h, 1.5f, track);
+        float thumbH = std::max(24.0f, view.h * view.h / contentH);
+        float maxScroll = std::max(1.0f, contentH - view.h);
+        float thumbY = view.y + scroll / maxScroll * (view.h - thumbH);
+        Color thumb = p.muted;
+        thumb.a = 0.55f;
+        c.FillRound(trackX, thumbY, 3, thumbH, 1.5f, thumb);
+    };
+    drawListScroll(welcomeRecentView_, welcomeRecentContentH_, welcomeRecentScroll_);
+    drawListScroll(welcomeWorkspaceView_, welcomeWorkspaceContentH_, welcomeWorkspaceScroll_);
+
+    c.ResetTransform();
+    c.PopClip();
+
+    Color footerBg = p.bg;
+    footerBg.a = 0.82f;
+    c.FillRect(0, h - 24, w, 24, footerBg);
+    std::wstring footer = std::wstring(L"LitheMD ") + kAppVersion +
+                          L"  ·  MIT License  ·  © 2026 LitheMD";
+    c.DrawText(footer, cx - std::min(300.0f, w / 2 - 12), h - 22,
+               std::min(600.0f, w - 24), 18, 10, p.muted, false, false,
+               DWRITE_TEXT_ALIGNMENT_CENTER);
 }
 
 void DocView::PaintError(Canvas& c) {
@@ -2674,21 +2737,29 @@ void DocView::OnMouseDown(int px, int py, bool ctrl) {
     else if (doc_->kind == DocKind::Image) m = Mode::Image;
     else m = Mode::Document;
     if (m == Mode::Welcome) {
-        if (welcomeOpenRect_.Contains(x, y)) {
+        float wy = y + scrollY_;
+        if (welcomeMoreRect_.Contains(x, wy)) {
+            welcomeRecentShown_ = std::min((int)recent_.size(),
+                                           std::max(welcomeRecentShown_, kWelcomeRecentPage) + kWelcomeRecentPage);
+            UpdateScrollBars();
+            InvalidateAll();
+            return;
+        }
+        if (welcomeOpenRect_.Contains(x, wy)) {
             if (events_.openMenu) events_.openMenu();
             else if (events_.openFile) events_.openFile();
             return;
         }
-        if (welcomeClearRect_.Contains(x, y)) {
+        if (welcomeClearRect_.Contains(x, wy)) {
             if (events_.clearRecent) events_.clearRecent();
             return;
         }
-        if (welcomeWorkspaceClearRect_.Contains(x, y)) {
+        if (welcomeWorkspaceClearRect_.Contains(x, wy)) {
             if (events_.clearWorkspaces) events_.clearWorkspaces();
             return;
         }
         for (size_t i = 0; i < welcomeWorkspaceRects_.size(); i++) {
-            if (welcomeWorkspaceRects_[i].Contains(x, y) && i < welcomeWorkspacePaths_.size()) {
+            if (welcomeWorkspaceRects_[i].Contains(x, wy) && i < welcomeWorkspacePaths_.size()) {
                 if (events_.openWorkspace) events_.openWorkspace(welcomeWorkspacePaths_[i]);
                 return;
             }
@@ -2696,11 +2767,11 @@ void DocView::OnMouseDown(int px, int py, bool ctrl) {
         for (size_t i = 0; i < welcomeRecentRects_.size(); i++) {
             if (i < welcomeRecentPaths_.size() &&
                 i < welcomeRecentDeleteRects_.size() &&
-                welcomeRecentDeleteRects_[i].Contains(x, y)) {
+                welcomeRecentDeleteRects_[i].Contains(x, wy)) {
                 if (events_.removeRecent) events_.removeRecent(welcomeRecentPaths_[i]);
                 return;
             }
-            if (welcomeRecentRects_[i].Contains(x, y) && i < welcomeRecentPaths_.size()) {
+            if (welcomeRecentRects_[i].Contains(x, wy) && i < welcomeRecentPaths_.size()) {
                 if (events_.openPath) events_.openPath(welcomeRecentPaths_[i]);
                 return;
             }
@@ -2985,25 +3056,27 @@ void DocView::OnMouseMove(int px, int py) {
     }
 
     if (m == Mode::Welcome) {
+        float wy = y + scrollY_;
         int hover = -1;
         for (size_t i = 0; i < welcomeRecentRects_.size(); i++) {
-            if (welcomeRecentRects_[i].Contains(x, y)) {
+            if (welcomeRecentRects_[i].Contains(x, wy)) {
                 if (i < welcomeRecentRowIndices_.size()) hover = welcomeRecentRowIndices_[i];
                 break;
             }
         }
         int workspaceHover = -1;
         for (size_t i = 0; i < welcomeWorkspaceRects_.size(); i++) {
-            if (welcomeWorkspaceRects_[i].Contains(x, y)) { workspaceHover = (int)i; break; }
+            if (welcomeWorkspaceRects_[i].Contains(x, wy)) { workspaceHover = (int)i; break; }
         }
         if (hover != hoverWelcome_ || workspaceHover != hoverWorkspace_) {
             hoverWelcome_ = hover;
             hoverWorkspace_ = workspaceHover;
             InvalidateAll();
         }
-        bool action = welcomeOpenRect_.Contains(x, y) ||
-                      welcomeClearRect_.Contains(x, y) ||
-                      welcomeWorkspaceClearRect_.Contains(x, y) ||
+        bool action = welcomeOpenRect_.Contains(x, wy) ||
+                      welcomeClearRect_.Contains(x, wy) ||
+                      welcomeWorkspaceClearRect_.Contains(x, wy) ||
+                      welcomeMoreRect_.Contains(x, wy) ||
                       hover >= 0 || workspaceHover >= 0;
         SetCursor(LoadCursorW(nullptr, action ? IDC_HAND : IDC_ARROW));
     } else if (m == Mode::Document && layout_) {
@@ -3088,7 +3161,20 @@ void DocView::OnMouseWheel(int delta, bool ctrl, bool shift, float x, float y) {
         return;
     }
     if (!doc_ && errorMessage_.empty()) {
-        if (welcomeRecentView_.Contains(x, y)) WelcomeScrollRecent(delta);
+        float wy = y + scrollY_;
+        if (welcomeRecentCard_.Contains(x, wy)) {
+            WelcomeScrollRecent(delta);
+            return;
+        }
+        if (welcomeWorkspaceCard_.Contains(x, wy)) {
+            WelcomeScrollWorkspace(delta);
+            return;
+        }
+        float step = wheelStep_ * kWheelLine;
+        if (delta > 0) step = -step;
+        scrollY_ = std::max(0.0f, scrollY_ + step);
+        UpdateScrollBars();
+        InvalidateAll();
         return;
     }
     float step = wheelStep_ * kWheelLine * (float)zoom_;

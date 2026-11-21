@@ -175,9 +175,19 @@ private:
     int hoverWorkspace_ = -1;
     int hoverLinkBlock_ = -1;
     std::wstring hoverLink_;
+    struct WelcomeMetrics {
+        float contentW = 0, viewX = 0;
+        float heroTop = 0, heroBottom = 0, cardsTop = 0;
+        bool twoCol = false;
+        bool compactHero = false;
+        float recentX = 0, recentW = 0, workspaceX = 0, workspaceW = 0;
+        float recentH = 0, workspaceH = 0, contentH = 0;
+    };
+    WelcomeMetrics ComputeWelcomeMetrics(float viewW, float viewH) const;
     DRect welcomeOpenRect_;
     DRect welcomeFolderRect_;
     DRect welcomeClearRect_;
+    DRect welcomeMoreRect_;
     std::vector<DRect> welcomeRecentRects_;
     std::vector<DRect> welcomeRecentDeleteRects_;
     std::vector<std::wstring> welcomeRecentPaths_;
@@ -187,8 +197,13 @@ private:
     std::vector<std::wstring> welcomeWorkspacePaths_;
     DRect welcomeWorkspaceClearRect_;
     DRect welcomeRecentView_;
+    DRect welcomeWorkspaceView_;
+    DRect welcomeRecentCard_;
+    DRect welcomeWorkspaceCard_;
     float welcomeRecentScroll_ = 0;
+    float welcomeWorkspaceScroll_ = 0;
     float welcomeRecentContentH_ = 0;
+    float welcomeWorkspaceContentH_ = 0;
     int welcomeRecentShown_ = 0;
     DRect errorOpenRect_, errorSourceRect_, errorExternalRect_;
     struct CopyTarget {
@@ -385,6 +400,7 @@ private:
     void DrawCopyButton(class Canvas& c);
     void ClearCopyFeedback();
     void WelcomeScrollRecent(int delta);
+    void WelcomeScrollWorkspace(int delta);
     void WelcomeResetRecentPaging();
     DRect CopyHitRect() const {
         if (!copyHover_.active) return {};
