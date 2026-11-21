@@ -45,6 +45,15 @@ GitHub：<https://github.com/whylantern/lithemd>
 
 文件类型优先按扩展名判断；无扩展名时根据内容推断 JSON / Markdown / CSV / 纯文本。
 
+以下可执行/系统二进制类型在读取和解码前直接拒绝：
+
+```text
+.exe .dll .sys .drv .scr .com .msi .msp .cpl .ocx .efi
+.bin .lnk .class .pyc .o .obj .lib
+```
+
+PDF、Office 和图片等已支持的二进制文档不受影响。
+
 ### 格式实现说明
 
 - **DOCX / XLSX**：直接解析 OOXML 的 ZIP + XML，不依赖 Office 或 Open XML SDK。
@@ -72,6 +81,8 @@ GitHub：<https://github.com/whylantern/lithemd>
 
 ## 主要特性
 
+- **统一打开菜单**：工具栏和欢迎页只保留一个“打开 ▾”按钮，可选择打开文件或文件夹；`Ctrl+O` / `Ctrl+Shift+O` 仍可直接执行
+- **工作区菜单**：右上角“文件 ▾”可打开新文件夹、显示/隐藏工作区或刷新
 - **多文件标签页**：同时打开多个文档，标签切换；关闭当前文件回到主页
 - 浅色 / 深色主题，覆盖正文、代码、表格、JSON 树、PDF 页框、图片、滚动条和设置窗口
 - 图片查看、未知格式按文本打开
@@ -88,6 +99,7 @@ GitHub：<https://github.com/whylantern/lithemd>
 - **路径输入**：`Ctrl+L` 粘贴文件、文件夹或 ZIP 路径，支持 `%USERPROFILE%`、`~` 和相对路径
 - **文件夹工作区**：`Ctrl+Shift+O` 打开文件夹，左侧懒加载目录树，点击文件直接预览，活动文件高亮
 - **最近打开**：主页内嵌滚动列表，按 8 条分批加载，最多保留 500 条历史；单条删除、清空和删除黑名单
+- **最近工作区**：最近文件列表下方显示最近 3 个文件夹工作区，可直接切换或清空
 - **阅读版式**：字号 85%–135%、正文宽度 680–1400，设置持久化
 - **文件监听**：外部保存后自动重载；有未保存笔记时先提示
 - **阅读位置记忆**：按文档记住滚动位置，下次打开同一文件时恢复
@@ -148,6 +160,7 @@ GitHub：<https://github.com/whylantern/lithemd>
   "zoom": 1.00,
   "fontScale": 1.00,
   "contentWidth": 1040,
+  "workspaceHistory": [],
   "workspaceRoot": "",
   "workspaceVisible": false,
   "wheelStep": 3,
@@ -229,6 +242,7 @@ lithemd/
 │  ├─ archive_reader/window  ZIP 目录、解密、解压与浏览窗口
 │  ├─ path_util / file_watch 路径解析、目录监听
 │  ├─ dialogs.cpp             路径、密码、文件夹选择器
+│  ├─ file_policy.cpp         不支持二进制类型特判
 │  ├─ render.cpp              Direct2D / DirectWrite / WIC 渲染
 │  ├─ markdown.cpp            Markdown 解析与代码高亮
 │  ├─ latex.cpp               LaTeX → DirectWrite 数学排版

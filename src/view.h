@@ -31,8 +31,11 @@ struct JsonRow {
 
 struct DocViewEvents {
     std::function<void()> openFile;
+    std::function<void()> openMenu;
     std::function<void()> openFolder;
     std::function<void(const std::wstring&)> openPath;
+    std::function<void(const std::wstring&)> openWorkspace;
+    std::function<void()> clearWorkspaces;
     std::function<void(const std::wstring&)> removeRecent;
     std::function<void()> clearRecent;
     std::function<void()> reload;
@@ -62,6 +65,7 @@ public:
     void SetContentWidth(int width);
     void SetWheelStep(int step);
     void SetRecent(const std::vector<std::wstring>& recent);
+    void SetWorkspaceHistory(const std::vector<std::wstring>& history);
 
     void SetDocument(std::unique_ptr<Document> doc, bool preserveScroll = false,
                      bool preserveInk = false);
@@ -163,6 +167,7 @@ private:
     int hoverGridRowSep_ = -1;
     int hoverJsonRow_ = -1;
     int hoverWelcome_ = -1;
+    int hoverWorkspace_ = -1;
     int hoverLinkBlock_ = -1;
     std::wstring hoverLink_;
     DRect welcomeOpenRect_;
@@ -172,6 +177,10 @@ private:
     std::vector<DRect> welcomeRecentDeleteRects_;
     std::vector<std::wstring> welcomeRecentPaths_;
     std::vector<int> welcomeRecentRowIndices_;
+    std::vector<std::wstring> workspaces_;
+    std::vector<DRect> welcomeWorkspaceRects_;
+    std::vector<std::wstring> welcomeWorkspacePaths_;
+    DRect welcomeWorkspaceClearRect_;
     DRect welcomeRecentView_;
     float welcomeRecentScroll_ = 0;
     float welcomeRecentContentH_ = 0;

@@ -228,6 +228,11 @@ void DocView::SetRecent(const std::vector<std::wstring>& recent) {
     InvalidateAll();
 }
 
+void DocView::SetWorkspaceHistory(const std::vector<std::wstring>& history) {
+    workspaces_ = history;
+    InvalidateAll();
+}
+
 void DocView::ClearDocument() {
     doc_.reset();
     if (canvas_) canvas_->ClearImageCache();
@@ -1391,6 +1396,7 @@ void DocView::WelcomeScrollRecent(int delta) {
                                         std::max(0.0f, newContentH - viewH));
     }
     hoverWelcome_ = -1;
+    hoverWorkspace_ = -1;
     InvalidateAll();
 }
 
@@ -1407,17 +1413,16 @@ void DocView::PaintWelcome(Canvas& c) {
     c.DrawText(L"LitheMD", cx - 200, top + 92, 400, 42, 32, c.palette().fg, true, false,
                DWRITE_TEXT_ALIGNMENT_CENTER);
 
-    float btnW = 154, btnH = 42;
-    float btnX = cx - btnW - 6, btnY = top + 174;
+    float btnW = 180, btnH = 42;
+    float btnX = cx - btnW / 2, btnY = top + 174;
     welcomeOpenRect_ = { btnX, btnY, btnW, btnH };
+    welcomeFolderRect_ = DRect{};
     c.FillRound(btnX, btnY, btnW, btnH, 8, c.palette().accent);
-    c.DrawText(L"打开文件", btnX, btnY + 1, btnW, btnH - 2, 14, HexColor(L"#FFFFFF"), true, false,
+    c.DrawText(L"打开", btnX, btnY + 1, btnW - 18, btnH - 2, 14, HexColor(L"#FFFFFF"), true, false,
                DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-    welcomeFolderRect_ = { btnX + btnW + 12, btnY, btnW, btnH };
-    c.StrokeRound(welcomeFolderRect_.x, welcomeFolderRect_.y, btnW, btnH, 8, c.palette().border);
-    c.DrawText(L"打开文件夹", welcomeFolderRect_.x, btnY + 1, btnW, btnH - 2, 13, c.palette().fg, false, false,
-               DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-    c.DrawText(L"Ctrl+O 打开文件   ·   Ctrl+L 输入路径   ·   可拖入文件或文件夹", cx - 340, btnY + 50, 680, 22, 12,
+    c.DrawIcon(L"\uE70D", btnX + btnW - 30, btnY + (btnH - 14) / 2, 14, 14, 9,
+               HexColor(L"#FFFFFF"));
+    c.DrawText(L"Ctrl+O 打开文件   ·   Ctrl+Shift+O 打开文件夹   ·   Ctrl+L 输入路径", cx - 360, btnY + 50, 720, 22, 12,
                c.palette().muted, false, false, DWRITE_TEXT_ALIGNMENT_CENTER);
 
     std::vector<std::wstring> chips = { L"Markdown", L"JSON", L"Notebook", L"CSV", L"PDF", L"Word", L"Excel", L"纯文本" };
@@ -1445,6 +1450,17 @@ void DocView::PaintWelcome(Canvas& c) {
     welcomeRecentView_ = DRect{};
     welcomeClearRect_ = DRect{};
     welcomeRecentContentH_ = 0;
+    welcomeWorkspaceRects_.clear();
+    welcomeWorkspacePaths_.clear();
+    welcomeWorkspaceClearRect_ = DRect{};
+    float rowW = std::min(560.0f, w - 40);
+    float viewX = cx - rowW / 2;
+    int wsShown = std::min<int>(3, (int)workspaces_.size());
+    const float wsRowH = 34.0f;
+    const float wsHeaderH = 24.0f;
+    float wsHeight = workspaces_.empty() ? 0 : wsHeaderH + wsShown * wsRowH + 8;
+    float wsTop = h - 24 - wsHeight;
+    if (workspaces_.empty() || wsShown == 0) wsTop = h - 24;
     float listHeaderTop = chipY + 54;
     if (!recent_.empty()) {
         if (welcomeRecentShown_ <= 0)
@@ -1456,9 +1472,8 @@ void DocView::PaintWelcome(Canvas& c) {
                    11, c.palette().muted, false, false,
                    DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
         float viewTop = listHeaderTop + 28;
-        float viewH = std::max(80.0f, h - viewTop - 24);
-        float rowW = std::min(560.0f, w - 40);
-        float viewX = cx - rowW / 2;
+        float viewH = std::max(64.0f, (workspaces_.empty() ? h - 24 : wsTop - 6) - viewTop);
+        if (workspaces_.empty()) viewH = std::max(80.0f, h - viewTop - 24);
         welcomeRecentView_ = { viewX, viewTop, rowW, viewH };
         welcomeRecentContentH_ = welcomeRecentShown_ * kWelcomeRowH + 30.0f;
         float maxScroll = std::max(0.0f, welcomeRecentContentH_ - viewH);
@@ -1513,6 +1528,31 @@ void DocView::PaintWelcome(Canvas& c) {
     } else {
         c.DrawText(L"打开一个文件后，最近记录会显示在这里。", cx - 280, listHeaderTop, 560, 22, 12,
                    c.palette().muted, false, false, DWRITE_TEXT_ALIGNMENT_CENTER);
+    }
+
+    if (!workspaces_.empty() && wsShown > 0) {
+        c.FillRect(viewX, wsTop - 8, rowW, 1, c.palette().border);
+        c.DrawText(L"最近工作区", cx - 280, wsTop, 240, 22, 12, c.palette().muted, true);
+        welcomeWorkspaceClearRect_ = { cx + 280 - 52, wsTop - 2, 52, 22 };
+        c.DrawText(L"清空", welcomeWorkspaceClearRect_.x, welcomeWorkspaceClearRect_.y,
+                   welcomeWorkspaceClearRect_.w, welcomeWorkspaceClearRect_.h, 11,
+                   c.palette().muted, false, false,
+                   DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+        for (int i = 0; i < wsShown; i++) {
+            float y = wsTop + wsHeaderH + i * wsRowH;
+            DRect r{ viewX, y, rowW, 32 };
+            if (hoverWorkspace_ == i) c.FillRound(r.x, r.y, r.w, r.h, 6, c.palette().hover);
+            const std::wstring& p = workspaces_[(size_t)i];
+            bool exists = DirExists(p);
+            c.DrawText(PathName(p), r.x + 12, r.y + 1, r.w - 24, 18, 12.0f,
+                       exists ? c.palette().fg : c.palette().muted, true, false,
+                       DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_NEAR, false);
+            c.DrawText(PathDir(p), r.x + 12, r.y + 17, r.w - 24, 14, 10.0f,
+                       c.palette().muted, false, false,
+                       DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_NEAR, false);
+            welcomeWorkspaceRects_.push_back(r);
+            welcomeWorkspacePaths_.push_back(p);
+        }
     }
 }
 
@@ -2489,16 +2529,23 @@ void DocView::OnMouseDown(int px, int py, bool ctrl) {
     else m = Mode::Document;
     if (m == Mode::Welcome) {
         if (welcomeOpenRect_.Contains(x, y)) {
-            if (events_.openFile) events_.openFile();
-            return;
-        }
-        if (welcomeFolderRect_.Contains(x, y)) {
-            if (events_.openFolder) events_.openFolder();
+            if (events_.openMenu) events_.openMenu();
+            else if (events_.openFile) events_.openFile();
             return;
         }
         if (welcomeClearRect_.Contains(x, y)) {
             if (events_.clearRecent) events_.clearRecent();
             return;
+        }
+        if (welcomeWorkspaceClearRect_.Contains(x, y)) {
+            if (events_.clearWorkspaces) events_.clearWorkspaces();
+            return;
+        }
+        for (size_t i = 0; i < welcomeWorkspaceRects_.size(); i++) {
+            if (welcomeWorkspaceRects_[i].Contains(x, y) && i < welcomeWorkspacePaths_.size()) {
+                if (events_.openWorkspace) events_.openWorkspace(welcomeWorkspacePaths_[i]);
+                return;
+            }
         }
         for (size_t i = 0; i < welcomeRecentRects_.size(); i++) {
             if (i < welcomeRecentPaths_.size() &&
@@ -2799,9 +2846,19 @@ void DocView::OnMouseMove(int px, int py) {
                 break;
             }
         }
-        if (hover != hoverWelcome_) { hoverWelcome_ = hover; InvalidateAll(); }
-        bool action = welcomeOpenRect_.Contains(x, y) || welcomeFolderRect_.Contains(x, y) ||
-                      welcomeClearRect_.Contains(x, y) || hover >= 0;
+        int workspaceHover = -1;
+        for (size_t i = 0; i < welcomeWorkspaceRects_.size(); i++) {
+            if (welcomeWorkspaceRects_[i].Contains(x, y)) { workspaceHover = (int)i; break; }
+        }
+        if (hover != hoverWelcome_ || workspaceHover != hoverWorkspace_) {
+            hoverWelcome_ = hover;
+            hoverWorkspace_ = workspaceHover;
+            InvalidateAll();
+        }
+        bool action = welcomeOpenRect_.Contains(x, y) ||
+                      welcomeClearRect_.Contains(x, y) ||
+                      welcomeWorkspaceClearRect_.Contains(x, y) ||
+                      hover >= 0 || workspaceHover >= 0;
         SetCursor(LoadCursorW(nullptr, action ? IDC_HAND : IDC_ARROW));
     } else if (m == Mode::Document && layout_) {
         int idx = HitBlock(x, y + scrollY_);
@@ -3168,6 +3225,7 @@ LRESULT DocView::Handle(UINT msg, WPARAM wp, LPARAM lp) {
     case WM_MOUSELEAVE:
         hoverJsonRow_ = -1;
         hoverWelcome_ = -1;
+        hoverWorkspace_ = -1;
         hoverGridColSep_ = hoverGridRowSep_ = -1;
         hoverLink_.clear();
         hoverLinkBlock_ = -1;

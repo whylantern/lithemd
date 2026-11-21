@@ -184,6 +184,7 @@ struct Settings {
     int wheelStep = 3;
     std::vector<std::wstring> recent;
     std::vector<std::wstring> recentBlocked;
+    std::vector<std::wstring> workspaceHistory;
     std::wstring workspaceRoot;
     bool workspaceVisible = false;
     std::wstring configPath;
@@ -195,6 +196,7 @@ struct Settings {
     static constexpr int MinWheelStep = 1;
     static constexpr int MaxWheelStep = 10;
     static constexpr size_t MaxRecent = 500;
+    static constexpr size_t MaxWorkspaceHistory = 20;
     static constexpr int DefaultInkTools = 87; // pen, eraser, line, rectangle, text
     int inkToolsVisible = DefaultInkTools;
     int canvasWidth = 2048;
@@ -223,5 +225,7 @@ struct Settings {
     void RemoveRecent(const std::wstring& path);
     void ClearRecent();
     bool RecentBlocked(const std::wstring& path) const;
+    void AddWorkspace(const std::wstring& path);
+    void ClearWorkspaces();
     void Clamp();
 };

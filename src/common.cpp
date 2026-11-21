@@ -1666,6 +1666,7 @@ void Settings::Clamp() {
         (int)documentLanguage > (int)DocLanguage::Western) documentLanguage = DocLanguage::Auto;
     while (recent.size() > MaxRecent) recent.pop_back();
     while (recentBlocked.size() > MaxRecent) recentBlocked.erase(recentBlocked.begin());
+    while (workspaceHistory.size() > MaxWorkspaceHistory) workspaceHistory.pop_back();
 }
 
 Settings Settings::Load() {
@@ -1703,6 +1704,14 @@ Settings Settings::Load() {
                     s.fontScale = m.second.number > 0 ? m.second.number : 1.0;
                 else if (key == L"contentwidth" || key == L"pagewidth")
                     s.contentWidth = (int)m.second.number;
+                else if ((key == L"workspacehistory" || key == L"workspaces") &&
+                         m.second.kind == JKind::Array) {
+                    s.workspaceHistory.clear();
+                    for (auto& it : m.second.items) {
+                        std::wstring v = it.Text();
+                        if (!v.empty()) s.workspaceHistory.push_back(v);
+                    }
+                }
                 else if (key == L"workspaceroot") s.workspaceRoot = NodeText(&m.second);
                 else if (key == L"workspacevisible") {
                     std::wstring v = ToLower(NodeText(&m.second));
@@ -1818,6 +1827,12 @@ bool Settings::Save() {
     swprintf(z, 32, L"%.2f", fontScale);
     out += L"  \"fontScale\": "; out += z; out += L",\n";
     out += L"  \"contentWidth\": " + std::to_wstring(contentWidth) + L",\n";
+    out += L"  \"workspaceHistory\": [";
+    for (size_t i = 0; i < workspaceHistory.size(); i++) {
+        if (i) out += L", ";
+        out += JsonEscape(workspaceHistory[i]);
+    }
+    out += L"],\n";
     out += L"  \"workspaceRoot\": " + JsonEscape(workspaceRoot) + L",\n";
     out += std::wstring(L"  \"workspaceVisible\": ") + (workspaceVisible ? L"true" : L"false") + L",\n";
     out += L"  \"wheelStep\": " + std::to_wstring(wheelStep) + L",\n";
@@ -1924,5 +1939,20 @@ void Settings::RemoveRecent(const std::wstring& path) {
 void Settings::ClearRecent() {
     recent.clear();
     recentBlocked.clear();
+    Save();
+}
+
+void Settings::AddWorkspace(const std::wstring& path) {
+    std::wstring full = AbsolutePath(path);
+    if (full.empty()) return;
+    workspaceHistory.erase(std::remove_if(workspaceHistory.begin(), workspaceHistory.end(),
+        [&](const std::wstring& p) { return _wcsicmp(p.c_str(), full.c_str()) == 0; }),
+        workspaceHistory.end());
+    workspaceHistory.insert(workspaceHistory.begin(), full);
+    while (workspaceHistory.size() > MaxWorkspaceHistory) workspaceHistory.pop_back();
+}
+
+void Settings::ClearWorkspaces() {
+    workspaceHistory.clear();
     Save();
 }

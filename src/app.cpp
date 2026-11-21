@@ -10,6 +10,7 @@
 #include "dialogs.h"
 #include "path_util.h"
 #include "file_watch.h"
+#include "file_policy.h"
 #include "reading_positions.h"
 #include <commdlg.h>
 #include <commctrl.h>
@@ -28,6 +29,9 @@ namespace {
 
 enum : int {
     CMD_OPEN = 1001,
+    CMD_OPEN_MENU,
+    CMD_WORKSPACE_MENU,
+    CMD_REFRESH_WORKSPACE,
     CMD_RELOAD,
     CMD_PREVIEW,
     CMD_SOURCE,
@@ -171,6 +175,7 @@ struct HeaderBtn {
     bool iconTop = false;
     bool active = false;
     bool enabled = true;
+    bool dropdown = false;
     int priority = 50; // lower number = keep longer when the window is narrow
 };
 
@@ -194,6 +199,7 @@ void SetDarkTitle(HWND hwnd, bool dark) {
 }
 
 std::wstring SourceTextForError(const std::wstring& path) {
+    if (IsBlockedBinaryFile(path)) return L"";
     DocKind k = DetectKind(path, L"");
     if (IsBinaryKind(k)) return L"";
     std::vector<uint8_t> bytes;
@@ -1206,6 +1212,9 @@ void SettingsWindow::Click(int id) {
         settings_->shortcuts.clear();
         settings_->recent.clear();
         settings_->recentBlocked.clear();
+        settings_->workspaceHistory.clear();
+        settings_->workspaceRoot.clear();
+        settings_->workspaceVisible = false;
         settings_->configPath = Settings::ResolveConfigPath();
         selectedExts_.clear();
         notice_ = L"本地配置和历史记录已清空。";
@@ -1458,6 +1467,7 @@ public:
         home_->SetFontScale(settings_.fontScale);
         home_->SetContentWidth(settings_.contentWidth);
         home_->SetRecent(settings_.recent);
+        home_->SetWorkspaceHistory(settings_.workspaceHistory);
 
         outline_.Create(hwnd_, 101);
         outline_.ApplyTheme(settings_.theme);
@@ -1748,8 +1758,22 @@ private:
     void WireView(DocView* view, bool home) {
         DocViewEvents ev;
         ev.openFile = [this] { OpenFileDialog(); };
+        ev.openMenu = [this] { ShowOpenMenu(); };
         ev.openFolder = [this] { OpenFolderDialog(); };
         ev.openPath = [this](const std::wstring& p) { OpenFile(p, true, true); };
+        ev.openWorkspace = [this](const std::wstring& p) {
+            if (DirExists(p)) OpenWorkspace(p, true);
+            else MessageBoxW(hwnd_, TranslateUi(L"该工作区不存在或无法访问。").c_str(),
+                             L"LitheMD", MB_OK | MB_ICONWARNING);
+        };
+        ev.clearWorkspaces = [this] {
+            if (settings_.workspaceHistory.empty()) return;
+            if (MessageBoxW(hwnd_, TranslateUi(L"清空全部最近工作区？").c_str(), L"LitheMD",
+                            MB_YESNO | MB_ICONQUESTION) != IDYES) return;
+            settings_.ClearWorkspaces();
+            if (home_) home_->SetWorkspaceHistory(settings_.workspaceHistory);
+            InvalidateChrome();
+        };
         ev.removeRecent = [this](const std::wstring& p) {
             settings_.RemoveRecent(p);
             if (home_) home_->SetRecent(settings_.recent);
@@ -1868,9 +1892,19 @@ private:
         }
         switch (id) {
         case CMD_OPEN: OpenFileDialog(); break;
+        case CMD_OPEN_MENU: ShowOpenMenu(); break;
         case CMD_OPEN_FOLDER: OpenFolderDialog(); break;
         case CMD_PATH: ShowPathDialog(); break;
         case CMD_WORKSPACE: ToggleWorkspace(); break;
+        case CMD_WORKSPACE_MENU: ShowWorkspaceMenu(); break;
+        case CMD_REFRESH_WORKSPACE:
+            if (workspace_.HasRoot()) {
+                workspace_.Refresh();
+                workspace_.SetActivePath(ActivePath(), false);
+                LayoutChildren();
+                InvalidateChrome();
+            }
+            break;
         case CMD_SPLIT: ToggleSplit(); break;
         case CMD_PRESENT: TogglePresentation(); break;
         case CMD_RELOAD: if (!ActivePath().empty()) Reload(false); break;
@@ -2229,7 +2263,10 @@ private:
             v->SetFontScale(settings_.fontScale);
             v->SetContentWidth(settings_.contentWidth);
         });
-        if (home_) home_->SetRecent(settings_.recent);
+        if (home_) {
+            home_->SetRecent(settings_.recent);
+            home_->SetWorkspaceHistory(settings_.workspaceHistory);
+        }
         outline_.ApplyTheme(settings_.theme);
         workspace_.ApplyTheme(settings_.theme);
         SetDarkTitle(hwnd_, settings_.dark);
@@ -2305,6 +2342,44 @@ private:
         InvalidateChrome();
     }
 
+    void ShowOpenMenu() {
+        HMENU menu = CreatePopupMenu();
+        if (!menu) return;
+        std::wstring openFile = TranslateUi(L"打开文件");
+        std::wstring openFolder = TranslateUi(L"打开文件夹");
+        AppendMenuW(menu, MF_STRING, CMD_OPEN, openFile.c_str());
+        AppendMenuW(menu, MF_STRING, CMD_OPEN_FOLDER, openFolder.c_str());
+        SetMenuDefaultItem(menu, CMD_OPEN, FALSE);
+        POINT pt{};
+        GetCursorPos(&pt);
+        SetForegroundWindow(hwnd_);
+        int command = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_LEFTALIGN | TPM_TOPALIGN,
+                                     pt.x, pt.y, 0, hwnd_, nullptr);
+        DestroyMenu(menu);
+        if (command) Command(command);
+    }
+
+    void ShowWorkspaceMenu() {
+        HMENU menu = CreatePopupMenu();
+        if (!menu) return;
+        std::wstring openFolder = TranslateUi(L"打开文件夹");
+        AppendMenuW(menu, MF_STRING, CMD_OPEN_FOLDER, openFolder.c_str());
+        if (workspace_.HasRoot()) {
+            AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+            std::wstring toggle = TranslateUi(settings_.workspaceVisible ? L"隐藏工作区" : L"显示工作区");
+            std::wstring refresh = TranslateUi(L"刷新工作区");
+            AppendMenuW(menu, MF_STRING, CMD_WORKSPACE, toggle.c_str());
+            AppendMenuW(menu, MF_STRING, CMD_REFRESH_WORKSPACE, refresh.c_str());
+        }
+        POINT pt{};
+        GetCursorPos(&pt);
+        SetForegroundWindow(hwnd_);
+        int command = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_LEFTALIGN | TPM_TOPALIGN,
+                                     pt.x, pt.y, 0, hwnd_, nullptr);
+        DestroyMenu(menu);
+        if (command) Command(command);
+    }
+
     void OpenFileDialog() {
         wchar_t file[32768] = L"";
         OPENFILENAMEW ofn{};
@@ -2343,8 +2418,18 @@ private:
             return;
         }
         settings_.workspaceRoot = workspace_.Model().Root();
+        settings_.workspaceHistory.erase(
+            std::remove_if(settings_.workspaceHistory.begin(), settings_.workspaceHistory.end(),
+                [&](const std::wstring& p) {
+                    return _wcsicmp(p.c_str(), settings_.workspaceRoot.c_str()) == 0;
+                }),
+            settings_.workspaceHistory.end());
+        settings_.workspaceHistory.insert(settings_.workspaceHistory.begin(), settings_.workspaceRoot);
+        while (settings_.workspaceHistory.size() > Settings::MaxWorkspaceHistory)
+            settings_.workspaceHistory.pop_back();
         settings_.workspaceVisible = show;
         settings_.Save();
+        if (home_) home_->SetWorkspaceHistory(settings_.workspaceHistory);
         workspace_.SetActivePath(ActivePath(), false);
         LayoutChildren();
         InvalidateChrome();
@@ -2558,8 +2643,11 @@ private:
             if (_wcsicmp(tabs_[i].path.c_str(), path.c_str()) == 0) {
                 if (activate) {
                     SwitchTab((int)i);
-                    uint64_t now = FileWriteTimeUtc(path);
-                    if (now && now != tabs_[i].fileTime) Reload(false);
+                    Tab* current = ActiveTab();
+                    if (current && _wcsicmp(current->path.c_str(), path.c_str()) == 0) {
+                        uint64_t now = FileWriteTimeUtc(path);
+                        if (now && now != current->fileTime) Reload(false);
+                    }
                 }
                 return;
             }
@@ -2747,7 +2835,8 @@ private:
             b.enabled = enabled;
             buttons_.push_back(std::move(b));
         };
-        add(CMD_OPEN, 78, L"打开", L"\uE838", false, false, true);
+        add(CMD_OPEN_MENU, 78, L"打开", L"\uE838", false, false, true);
+        buttons_.back().dropdown = true;
         add(CMD_RELOAD, 46, L"刷新", L"\uE72C", true, false, active_ >= 0 && !ActivePath().empty());
         std::vector<HeaderBtn> right;
         auto addRight = [&](int cmd, float w, std::wstring text, std::wstring glyph = L"",
@@ -2783,8 +2872,9 @@ private:
         addRight(CMD_INK, 46, L"画笔", L"\uE70F", true, canInk && view && view->InkMode(), canInk, 50);
         addRight(CMD_TOC, 46, L"大纲", L"\uE8FD", true, outlineWanted_,
                  active_ >= 0 && view && view->CanOutline(), 80);
-        addRight(CMD_WORKSPACE, 50, L"文件", L"\uE8B7", true, settings_.workspaceVisible,
+        addRight(CMD_WORKSPACE_MENU, 50, L"文件", L"\uE8B7", true, settings_.workspaceVisible,
                  true, 75);
+        right.back().dropdown = true;
         addRight(CMD_SAVE_NOTES, 50, L"保存", L"\uE74E", true, false,
                  view && view->CanSaveNotes() && view->HasUnsavedNotes(), 20);
         addRight(CMD_EXPORT, 50, L"导出", L"", false, false,
@@ -2825,7 +2915,7 @@ private:
         }
         for (auto& b : right) buttons_.push_back(b);
         for (auto& b : buttons_) {
-            if (b.cmd == CMD_OPEN) b.rect.x = 118;
+            if (b.cmd == CMD_OPEN_MENU) b.rect.x = 118;
             else if (b.cmd == CMD_RELOAD) b.rect.x = 200;
         }
     }
@@ -2852,6 +2942,12 @@ private:
         } else {
             c.DrawText(b.text, b.rect.x, b.rect.y, b.rect.w, b.rect.h, 12.0f, fg, b.active, false,
                        DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, false);
+        }
+        if (b.dropdown) {
+            float aw = 12.0f;
+            float ax = b.rect.x + b.rect.w - aw - 3;
+            float ay = b.iconTop ? b.rect.y + b.rect.h - 15 : b.rect.y + (b.rect.h - aw) / 2;
+            c.DrawIcon(L"\uE70D", ax, ay, aw, aw, b.iconTop ? 7.0f : 8.0f, sub);
         }
     }
 

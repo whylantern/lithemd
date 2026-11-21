@@ -21,6 +21,8 @@ Core 层
   archive_reader.cpp      ZIP 目录、解密、解压
   file_watch.cpp          目录变化监听
   reading_positions.cpp   按文档保存滚动位置
+  file_policy.cpp         不支持二进制类型特判
+  workspace_model.cpp     工作区历史与懒加载目录树
   common.cpp              Settings/Recent/路径/编码等基础能力
 
 Platform / 第三方
@@ -85,7 +87,14 @@ ZipCrypto 密码优先按 UTF-8 尝试，再按系统 ANSI 尝试；AES 使用 U
   - 文件被删除：保留标签并显示错误。
 - 只监听一个目录，不递归、不建立索引。
 
-### 2.5 ReadingPositions（`reading_positions.*`）
+### 2.5 FilePolicy（`file_policy.*`）
+
+- 在 `LoadDocument` 读取文件之前拒绝不支持的可执行/系统二进制类型。
+- `SourceTextForError` 对同一名单直接返回空文本，避免错误页再次读取。
+- 支持格式（PDF、Office、图片、ZIP）不经过该拦截。
+- 名单集中在 Core 层，后续新增格式时只修改一处。
+
+### 2.6 ReadingPositions（`reading_positions.*`）
 
 - 按文档绝对路径保存 0–1 的滚动比例，不保存像素位置。
 - 配置文件与 `config.json` 同目录：`reading-positions.json`。
@@ -93,9 +102,11 @@ ZipCrypto 密码优先按 UTF-8 尝试，再按系统 ANSI 尝试；AES 使用 U
 - 文档滚动到顶部或没有可滚动内容时删除记录。
 - 切换标签、关闭标签、退出应用时写入；打开文档后由 `DocView::RestoreScrollFraction` 恢复。
 
-### 2.6 UI 组件
+### 2.7 UI 组件
 
 - `WorkspaceView`：左侧工作区树，展开/折叠、活动文件高亮、刷新和关闭。
+- 文件菜单：工具栏和欢迎页共用一个“打开 ▾”菜单；右上角“文件 ▾”提供打开文件夹、显示/隐藏工作区和刷新。
+- 最近工作区：设置保存最多 20 个根目录，欢迎页显示最近 3 个。
 - `ArchiveWindow`：独立顶层窗口，列表、预览、单条解压、全部解压、密码提示。
 - `ShowTextInput` / `PickFolder`：共用原生输入与选择器，不引入第三方 UI。
 

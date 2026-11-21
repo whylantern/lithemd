@@ -1,4 +1,5 @@
 #include "document.h"
+#include "file_policy.h"
 #include "json.h"
 #include "office.h"
 #include "latex.h"
@@ -522,6 +523,10 @@ static std::unique_ptr<Document> LoadDocumentImpl(const std::wstring& pathIn, st
     error.clear();
     auto startTime = std::chrono::steady_clock::now();
     std::wstring path = AbsolutePath(pathIn);
+    if (IsBlockedBinaryFile(path)) {
+        error = L"不支持打开该文件类型：" + PathExt(path) + L"。";
+        return nullptr;
+    }
     if (!FileExists(path)) {
         error = L"文件不存在或无法访问：\n" + path;
         return nullptr;

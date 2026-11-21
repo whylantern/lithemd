@@ -34,6 +34,9 @@ Platform   文件系统、BCrypt、WIC、Direct2D、Win32 封装
 
 ### 2.3 安全
 
+- 可执行/系统二进制文件必须在读取和解码前拒绝：
+  `.exe .dll .sys .drv .scr .com .msi .msp .cpl .ocx .efi .bin .lnk .class .pyc .o .obj .lib`。
+  该规则适用于命令行、拖放、路径输入、最近记录和 ZIP 条目预览。
 - ZIP 解压必须防 Zip Slip、绝对路径、盘符、UNC、符号链接和 `..`。
 - 必须限制单文件大小、总解压大小、压缩比和页数/条目数。
 - 密码只存在内存中，不写入 `config.json`、笔记、日志或最近记录。
