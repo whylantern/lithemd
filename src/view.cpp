@@ -1304,11 +1304,38 @@ void DocView::PaintContent(Canvas& c, bool exportOnly) {
     if (middlePan_ && !exportOnly) {
         auto& pal = c.palette();
         float ax = (float)panAnchor_.x, ay = (float)panAnchor_.y;
-        float bx = (float)panCurrent_.x, by = (float)panCurrent_.y;
-        c.DrawLine(ax, ay, bx, by, pal.accent, 1.6f);
-        c.FillCircle(ax, ay, 7, pal.accentSoft);
-        c.FillCircle(ax, ay, 3.5f, pal.accent);
-        c.FillCircle(bx, by, 4, pal.accent);
+        Color shadow = HexColor(L"#000000", 0.14f);
+        c.FillCircle(ax + 1, ay + 2, 20, shadow);
+        Color bubble = pal.surface;
+        bubble.a = 0.94f;
+        c.FillCircle(ax, ay, 19, bubble);
+        c.DrawEllipse(ax, ay, 18, 18, pal.border, 1.0f);
+        Color idle = pal.muted;
+        idle.a = 0.82f;
+        Color upColor = panVelocityY_ < -18 ? pal.accent : idle;
+        Color downColor = panVelocityY_ > 18 ? pal.accent : idle;
+        Color leftColor = panVelocityX_ < -18 ? pal.accent : idle;
+        Color rightColor = panVelocityX_ > 18 ? pal.accent : idle;
+        auto arrow = [&](float x1, float y1, float x2, float y2, const Color& col) {
+            c.DrawLine(x1, y1, x2, y2, col, 1.7f);
+        };
+        // Up
+        arrow(ax, ay - 12, ax - 4, ay - 8, upColor);
+        arrow(ax, ay - 12, ax + 4, ay - 8, upColor);
+        arrow(ax, ay - 12, ax, ay - 5, upColor);
+        // Down
+        arrow(ax, ay + 12, ax - 4, ay + 8, downColor);
+        arrow(ax, ay + 12, ax + 4, ay + 8, downColor);
+        arrow(ax, ay + 12, ax, ay + 5, downColor);
+        // Left
+        arrow(ax - 12, ay, ax - 8, ay - 4, leftColor);
+        arrow(ax - 12, ay, ax - 8, ay + 4, leftColor);
+        arrow(ax - 12, ay, ax - 5, ay, leftColor);
+        // Right
+        arrow(ax + 12, ay, ax + 8, ay - 4, rightColor);
+        arrow(ax + 12, ay, ax + 8, ay + 4, rightColor);
+        arrow(ax + 12, ay, ax + 5, ay, rightColor);
+        c.FillCircle(ax, ay, 2.4f, pal.accent);
     }
     // Ink follows the document content, then the copy affordance / pen toolbar
     // are drawn on top so text can never cover the interactive controls.
@@ -2589,11 +2616,14 @@ void DocView::BeginMiddlePan(int px, int py) {
     float scale = GetDpiForWindow(hwnd_) / 96.0f;
     panAnchor_.x = panCurrent_.x = (LONG)std::lround(px / scale);
     panAnchor_.y = panCurrent_.y = (LONG)std::lround(py / scale);
+    panVelocityX_ = panVelocityY_ = 0;
+    panLastTick_ = GetTickCount64();
     middlePan_ = true;
+    SetFocus(hwnd_);
     SetCapture(hwnd_);
     if (panTimer_) KillTimer(hwnd_, 1);
     panTimer_ = 1;
-    SetTimer(hwnd_, 1, 15, nullptr);
+    SetTimer(hwnd_, 1, 16, nullptr);
     SetCursor(LoadCursorW(nullptr, IDC_SIZEALL));
     InvalidateAll();
 }
@@ -2603,12 +2633,14 @@ void DocView::UpdateMiddlePan(int px, int py) {
     float scale = GetDpiForWindow(hwnd_) / 96.0f;
     panCurrent_.x = (LONG)std::lround(px / scale);
     panCurrent_.y = (LONG)std::lround(py / scale);
+    SetCursor(LoadCursorW(nullptr, IDC_SIZEALL));
     InvalidateAll();
 }
 
 void DocView::EndMiddlePan() {
     if (!middlePan_) return;
     middlePan_ = false;
+    panVelocityX_ = panVelocityY_ = 0;
     if (panTimer_) { KillTimer(hwnd_, 1); panTimer_ = 0; }
     if (GetCapture() == hwnd_) ReleaseCapture();
     SetCursor(LoadCursorW(nullptr, IDC_ARROW));
@@ -2619,6 +2651,10 @@ void DocView::OnMouseDown(int px, int py, bool ctrl) {
     SetFocus(hwnd_);
     float scale = GetDpiForWindow(hwnd_) / 96.0f;
     float x = px / scale, y = py / scale;
+    if (middlePan_) {
+        EndMiddlePan();
+        return;
+    }
     if (inkMode_) {
         if (inkEdit_) InkCommitText();
         bool gridTabStrip = false;
@@ -3153,6 +3189,7 @@ void DocView::OnMouseMove(int px, int py) {
 
 void DocView::OnMouseWheel(int delta, bool ctrl, bool shift, float x, float y) {
     if (inkEdit_) InkCommitText();
+    if (middlePan_) EndMiddlePan();
     copyHover_.active = false;
     hoverGridColSep_ = hoverGridRowSep_ = -1;
     ClearCopyFeedback();
@@ -3188,6 +3225,10 @@ void DocView::OnMouseWheel(int delta, bool ctrl, bool shift, float x, float y) {
 void DocView::OnKeyDown(WPARAM key) {
     // Customizable application/document shortcuts are handled by MainWindow's
     // message loop. Only context-local keys remain here.
+    if (middlePan_ && key == VK_ESCAPE) {
+        EndMiddlePan();
+        return;
+    }
     if (inkMode_ && key == VK_ESCAPE) {
         if (!inkSelection_.empty()) {
             inkSelection_.clear();
@@ -3347,6 +3388,9 @@ LRESULT DocView::Handle(UINT msg, WPARAM wp, LPARAM lp) {
         UpdateScrollBars();
         InvalidateAll();
         return 0;
+    case WM_KILLFOCUS:
+        if (middlePan_) EndMiddlePan();
+        break;
     case WM_PAINT: {
         PAINTSTRUCT ps{};
         BeginPaint(hwnd_, &ps);
@@ -3401,24 +3445,48 @@ LRESULT DocView::Handle(UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
     case WM_MBUTTONDOWN:
-        BeginMiddlePan(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
+        if (middlePan_) EndMiddlePan();
+        else BeginMiddlePan(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
         return 0;
     case WM_MBUTTONUP:
-        EndMiddlePan();
+        // Autoscroll remains active after release; left/middle click or Esc
+        // exits, matching common browser/PDF reader behavior.
         return 0;
+    case WM_RBUTTONDOWN:
+        if (middlePan_) {
+            EndMiddlePan();
+            return 0;
+        }
+        break;
     case WM_TIMER:
         if (wp == 1 && middlePan_) {
             copyHover_.active = false;
+            ULONGLONG now = GetTickCount64();
+            float dt = (now - panLastTick_) / 1000.0f;
+            panLastTick_ = now;
+            dt = Clampf(dt, 0.008f, 0.05f);
             float dx = (float)(panCurrent_.x - panAnchor_.x);
             float dy = (float)(panCurrent_.y - panAnchor_.y);
             float dist = std::sqrt(dx * dx + dy * dy);
-            if (dist > 6.0f) {
-                float speed = std::min(26.0f, 1.0f + (dist - 6.0f) * 0.075f);
-                scrollX_ = std::max(0.0f, scrollX_ + dx / dist * speed);
-                scrollY_ = std::max(0.0f, scrollY_ + dy / dist * speed);
-                UpdateScrollBars();
-                InvalidateAll();
+            float targetX = 0, targetY = 0;
+            const float deadZone = 10.0f;
+            const float maxRadius = 180.0f;
+            const float maxSpeed = 1850.0f;
+            if (dist > deadZone) {
+                float strength = std::min(1.0f, (dist - deadZone) / (maxRadius - deadZone));
+                float speed = maxSpeed * (0.10f + 0.90f * strength) * strength;
+                targetX = dx / dist * speed * 0.72f;
+                targetY = dy / dist * speed;
             }
+            float blend = 1.0f - std::exp(-dt * 20.0f);
+            panVelocityX_ += (targetX - panVelocityX_) * blend;
+            panVelocityY_ += (targetY - panVelocityY_) * blend;
+            if (std::abs(panVelocityX_) < 0.4f) panVelocityX_ = 0;
+            if (std::abs(panVelocityY_) < 0.4f) panVelocityY_ = 0;
+            scrollX_ = std::max(0.0f, scrollX_ + panVelocityX_ * dt);
+            scrollY_ = std::max(0.0f, scrollY_ + panVelocityY_ * dt);
+            UpdateScrollBars();
+            InvalidateAll();
         } else if (wp == 2) {
             copyDone_ = false;
             copyPressed_ = false;

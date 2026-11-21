@@ -12,7 +12,7 @@
 #include <vector>
 #include <cstdint>
 
-inline constexpr wchar_t kAppVersion[] = L"2.4.3.1";
+inline constexpr wchar_t kAppVersion[] = L"2.4.3.2";
 
 // ------------------------------------------------------------------ strings
 std::wstring WideFromUtf8(const std::string& s);

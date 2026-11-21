@@ -152,6 +152,9 @@ private:
     bool middlePan_ = false;
     POINT panAnchor_{};
     POINT panCurrent_{};
+    float panVelocityX_ = 0;
+    float panVelocityY_ = 0;
+    ULONGLONG panLastTick_ = 0;
     UINT_PTR panTimer_ = 0;
 
     struct Layout;
