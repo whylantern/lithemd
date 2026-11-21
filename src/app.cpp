@@ -192,6 +192,19 @@ std::wstring FitText(Canvas& c, const std::wstring& text, float size, bool bold,
     return L"…";
 }
 
+HICON SettingsWindowIcon(bool small) {
+    static HICON largeIcon = nullptr;
+    static HICON smallIcon = nullptr;
+    HICON& icon = small ? smallIcon : largeIcon;
+    if (icon) return icon;
+    SHSTOCKICONINFO info{};
+    info.cbSize = sizeof(info);
+    UINT flags = SHGSI_ICON | (small ? SHGSI_SMALLICON : SHGSI_LARGEICON);
+    if (SUCCEEDED(SHGetStockIconInfo(SIID_SETTINGS, flags, &info))) icon = info.hIcon;
+    if (!icon) icon = LoadIconW(nullptr, IDI_APPLICATION);
+    return icon;
+}
+
 std::wstring BackgroundConfigDirectory(const Settings& settings) {
     std::wstring cfg = settings.configPath.empty() ? Settings::ResolveConfigPath() : settings.configPath;
     return PathDir(cfg);
@@ -794,6 +807,8 @@ public:
         wc.hInstance = inst;
         wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
         wc.hbrBackground = nullptr;
+        wc.hIcon = SettingsWindowIcon(false);
+        wc.hIconSm = SettingsWindowIcon(true);
         wc.lpszClassName = L"LitheMdSettings";
         RegisterClassExW(&wc);
         DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN | WS_VSCROLL;
@@ -822,6 +837,8 @@ public:
         hwnd_ = CreateWindowExW(0, L"LitheMdSettings", TranslateUi(L"设置").c_str(), style, ox, oy, ww, wh,
                                 owner, nullptr, inst, this);
         if (!hwnd_) return false;
+        SendMessageW(hwnd_, WM_SETICON, ICON_BIG, (LPARAM)SettingsWindowIcon(false));
+        SendMessageW(hwnd_, WM_SETICON, ICON_SMALL, (LPARAM)SettingsWindowIcon(true));
         if (SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0)) {
             RECT wr{};
             GetWindowRect(hwnd_, &wr);
@@ -875,6 +892,9 @@ private:
     void Paint();
     LRESULT Handle(UINT msg, WPARAM wp, LPARAM lp);
     void Click(int id);
+    void BeginOpacityEdit();
+    void CommitOpacityEdit(bool cancel);
+    DRect OpacityValueRect() const;
     bool AllExtensionsSelected() const {
         for (auto& ext : AssociationExtensions())
             if (!selectedExts_.count(ext)) return false;
@@ -916,6 +936,10 @@ private:
     std::wstring notice_;
     std::wstring pendingBackgroundDeletePath_;
     std::wstring pendingBackgroundDeleteId_;
+    bool opacityEditing_ = false;
+    bool opacityReplace_ = true;
+    std::wstring opacityInput_;
+    std::wstring opacityError_;
 };
 
 void SettingsWindow::Paint() {
@@ -943,7 +967,8 @@ void SettingsWindow::Paint() {
     c.SetTransform(0, -scrollY_);
     rects_.clear();
     checks_.clear();
-    c.DrawText(L"设置", 24, 16, 300, 34, 23, p.fg, true);
+    c.DrawIcon(L"\uE713", 24, 14, 28, 28, 19, p.accent);
+    c.DrawText(L"设置", 56, 16, 300, 34, 23, p.fg, true);
     c.FillRect(24, 78, w - 48, 1, p.border);
 
     c.DrawText(L"外观", 24, 94, 120, 22, 13, p.fg, true);
@@ -1119,11 +1144,9 @@ void SettingsWindow::Paint() {
     c.DrawText(L"背景不透明度", 300, 1744, 120, 20, 11.5f, p.fg, true);
     int opacity = std::clamp(settings_->backgroundOpacity,
                             Settings::MinBackgroundOpacity, Settings::MaxBackgroundOpacity);
-    AddBtn(62, 424, 1738, 34, 34, L"−");
-    c.StrokeRound(462, 1738, 70, 34, 6, p.border);
-    c.DrawText(std::to_wstring(opacity) + L"%", 462, 1738, 70, 34, 12, p.fg, true, false,
-               DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-    AddBtn(63, 536, 1738, 34, 34, L"+");
+    AddBtn(62, 424, 1738, 34, 34, L"−", false, opacity > Settings::MinBackgroundOpacity);
+    AddBtn(68, 462, 1738, 70, 34, L"");
+    AddBtn(63, 536, 1738, 34, 34, L"+", false, opacity < Settings::MaxBackgroundOpacity);
     int fit = std::clamp(settings_->backgroundFit,
                          Settings::MinBackgroundFit, Settings::MaxBackgroundFit);
     c.DrawText(L"填充方式", 24, 1786, 80, 20, 11.5f, p.fg, true);
@@ -1137,7 +1160,10 @@ void SettingsWindow::Paint() {
     const wchar_t* anchorLabels[] = { L"左上", L"上", L"右上", L"左", L"中", L"右", L"左下", L"下", L"右下" };
     for (int i = 0; i < 9; i++)
         AddBtn(70 + i, 104 + i * 52.0f, 1822, 46, 32, anchorLabels[i], anchor == i);
-    c.DrawText(L"5% – 60%，默认 15%；位置仅在铺满裁剪时生效", 24, 1866, w - 48, 18, 10.5f, p.muted);
+    if (!opacityError_.empty())
+        c.DrawText(opacityError_, 24, 1866, w - 48, 18, 10.5f, p.danger);
+    else
+        c.DrawText(L"5% – 60%，默认 15%；位置仅在铺满裁剪时生效", 24, 1866, w - 48, 18, 10.5f, p.muted);
     c.DrawText(L"选择后复制到配置目录并生成 ID，原图移动或删除不影响背景", 24, 1884, w - 48, 18, 10.5f, p.muted);
     c.FillRect(24, 1914, w - 48, 1, p.border);
     AddBtn(13, 24, 1928, 120, 34, L"恢复默认");
@@ -1150,6 +1176,15 @@ void SettingsWindow::Paint() {
 
     for (auto& r : rects_) {
         if (r.enabled && r.id == hover_) c.FillRound(r.x, r.y, r.w, r.h, 7, p.hover);
+        if (r.id == 68) {
+            c.StrokeRound(r.x, r.y, r.w, r.h, 7, p.border);
+            std::wstring shown = opacityEditing_
+                ? opacityInput_ + L"|"
+                : std::to_wstring(opacity) + L"%";
+            c.DrawText(shown, r.x, r.y, r.w, r.h, 12, p.fg, true, false,
+                       DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            continue;
+        }
         if (!r.enabled) {
             Color border = p.border;
             border.a *= 0.55f;
@@ -1172,8 +1207,62 @@ void SettingsWindow::Paint() {
     c.End();
 }
 
+DRect SettingsWindow::OpacityValueRect() const {
+    for (auto& r : rects_)
+        if (r.id == 68) return { r.x, r.y, r.w, r.h };
+    return DRect{};
+}
+
+void SettingsWindow::BeginOpacityEdit() {
+    if (opacityEditing_) return;
+    opacityEditing_ = true;
+    opacityReplace_ = true;
+    int value = std::clamp(settings_->backgroundOpacity,
+                           Settings::MinBackgroundOpacity, Settings::MaxBackgroundOpacity);
+    opacityInput_ = std::to_wstring(value);
+    opacityError_.clear();
+    SetFocus(hwnd_);
+    InvalidateRect(hwnd_, nullptr, FALSE);
+    UpdateWindow(hwnd_);
+}
+
+void SettingsWindow::CommitOpacityEdit(bool cancel) {
+    if (!opacityEditing_) return;
+    opacityEditing_ = false;
+    bool valid = !opacityInput_.empty();
+    int value = 0;
+    for (wchar_t ch : opacityInput_) {
+        if (ch < L'0' || ch > L'9') { valid = false; break; }
+        value = value * 10 + (ch - L'0');
+        if (value > 10000) { valid = false; break; }
+    }
+    if (!cancel) {
+        if (valid && value >= Settings::MinBackgroundOpacity &&
+            value <= Settings::MaxBackgroundOpacity) {
+            opacityError_.clear();
+            if (settings_->backgroundOpacity != value) {
+                settings_->backgroundOpacity = value;
+                settings_->Save();
+                if (changed_) changed_();
+            }
+        } else {
+            opacityError_ = L"请输入 5–60 之间的整数";
+        }
+    }
+    opacityInput_.clear();
+    if (hwnd_) {
+        InvalidateRect(hwnd_, nullptr, FALSE);
+        UpdateWindow(hwnd_);
+    }
+}
+
 void SettingsWindow::Click(int id) {
     bool persist = true;
+    if (id == 68) {
+        BeginOpacityEdit();
+        return;
+    }
+    opacityError_.clear();
     if (id >= 100 && id < 115) {
         if (command_) command_(CMD_ENC_UTF8 + (id - 100));
         if (hwnd_) InvalidateRect(hwnd_, nullptr, FALSE);
@@ -1493,6 +1582,7 @@ void SettingsWindow::Click(int id) {
         if (hwnd_) InvalidateRect(hwnd_, nullptr, FALSE);
         return;
     case 15:
+        if (opacityEditing_) CommitOpacityEdit(false);
         DestroyWindow(hwnd_);
         return;
     default:
@@ -1547,6 +1637,8 @@ LRESULT SettingsWindow::Handle(UINT msg, WPARAM wp, LPARAM lp) {
     case WM_LBUTTONDOWN: {
         float scale = GetDpiForWindow(hwnd_) / 96.0f;
         float x = GET_X_LPARAM(lp) / scale, y = GET_Y_LPARAM(lp) / scale + scrollY_;
+        if (opacityEditing_ && !OpacityValueRect().Contains(x, y))
+            CommitOpacityEdit(false);
         for (auto& ch : toolChecks_) {
             if (ch.rect.Contains(x, y)) {
                 if (ch.toolIndex >= 0) {
@@ -1582,16 +1674,20 @@ LRESULT SettingsWindow::Handle(UINT msg, WPARAM wp, LPARAM lp) {
         InvalidateRect(hwnd_, nullptr, FALSE);
         return 0;
     case WM_MOUSEWHEEL: {
+        if (opacityEditing_) CommitOpacityEdit(false);
         float scale = GetDpiForWindow(hwnd_) / 96.0f;
         RECT rc{};
         GetClientRect(hwnd_, &rc);
         float h = rc.bottom / scale;
         float maxScroll = std::max(0.0f, contentHeight_ - h);
-        scrollY_ = Clampf(scrollY_ - GET_WHEEL_DELTA_WPARAM(wp) / 120.0f * 60.0f, 0.0f, maxScroll);
+        float line = 34.0f * std::clamp(settings_->wheelStep, 1, 10);
+        scrollY_ = Clampf(scrollY_ - GET_WHEEL_DELTA_WPARAM(wp) / 120.0f * line,
+                          0.0f, maxScroll);
         InvalidateRect(hwnd_, nullptr, FALSE);
         return 0;
     }
     case WM_VSCROLL: {
+        if (opacityEditing_) CommitOpacityEdit(false);
         float scale = GetDpiForWindow(hwnd_) / 96.0f;
         RECT rc{};
         GetClientRect(hwnd_, &rc);
@@ -1619,13 +1715,47 @@ LRESULT SettingsWindow::Handle(UINT msg, WPARAM wp, LPARAM lp) {
         InvalidateRect(hwnd_, nullptr, FALSE);
         return 0;
     }
+    case WM_CHAR:
+        if (opacityEditing_) {
+            wchar_t ch = (wchar_t)wp;
+            if (ch == L'\r') {
+                CommitOpacityEdit(false);
+            } else if (ch == 27) {
+                CommitOpacityEdit(true);
+            } else if (ch == 8) {
+                if (opacityReplace_) {
+                    opacityInput_.clear();
+                    opacityReplace_ = false;
+                } else if (!opacityInput_.empty()) {
+                    opacityInput_.pop_back();
+                }
+                InvalidateRect(hwnd_, nullptr, FALSE);
+            } else if (ch >= L'0' && ch <= L'9') {
+                if (opacityReplace_) {
+                    opacityInput_.clear();
+                    opacityReplace_ = false;
+                }
+                if (opacityInput_.size() < 3) opacityInput_.push_back(ch);
+                InvalidateRect(hwnd_, nullptr, FALSE);
+            }
+            return 0;
+        }
+        break;
     case WM_KEYDOWN:
+        if (opacityEditing_) {
+            if (wp == VK_ESCAPE) CommitOpacityEdit(true);
+            return 0;
+        }
         if (wp == VK_ESCAPE) DestroyWindow(hwnd_);
+        return 0;
+    case WM_KILLFOCUS:
+        if (opacityEditing_) CommitOpacityEdit(false);
         return 0;
     case WM_NCACTIVATE:
         SetDarkTitle(hwnd_, settings_->dark);
         break;
     case WM_CLOSE:
+        if (opacityEditing_) CommitOpacityEdit(false);
         DestroyWindow(hwnd_);
         return 0;
     case WM_DESTROY:

@@ -6,9 +6,9 @@ GitHub：<https://github.com/whylantern/lithemd>
 
 编译产物 `dist\lithemd.exe` 约 9 MB（内嵌 PDFium），在 Windows 10 1903+ / Windows 11 上直接双击即可运行。
 
-## 界面
+## 界面与背景
 
-![LitheMD 阅读界面](assets/screenshots/main.png)
+![LitheMD 背景图片与阅读风格](assets/screenshots/background.png)
 
 ## 为什么是 C++
 
