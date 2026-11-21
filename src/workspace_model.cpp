@@ -3,11 +3,8 @@
 #include <windows.h>
 #include <algorithm>
 #include <cwctype>
-#include <functional>
 
 namespace {
-
-constexpr size_t kMaxChildren = 4000;
 
 bool SamePath(const std::wstring& a, const std::wstring& b) {
     return _wcsicmp(a.c_str(), b.c_str()) == 0;
@@ -39,16 +36,19 @@ bool IsInside(const std::wstring& root, const std::wstring& path) {
     return part != L"..";
 }
 
-struct FindData {
-    std::wstring name;
-    std::wstring path;
-    bool isDir = false;
-};
+bool EntryLess(const CachedEntry& a, const CachedEntry& b) {
+    if (a.isDir != b.isDir) return a.isDir;
+    return _wcsicmp(a.name.c_str(), b.name.c_str()) < 0;
+}
 
 } // namespace
 
+WorkspaceModel::WorkspaceModel() : scanner_(std::make_unique<WorkspaceScanner>()) {}
+WorkspaceModel::~WorkspaceModel() {
+    if (scanner_) scanner_->Stop();
+}
+
 bool WorkspaceModel::SetRoot(const std::wstring& path, std::wstring* error) {
-    Clear();
     std::wstring full = AbsolutePath(path);
     if (!DirExists(full)) {
         if (error) *error = L"文件夹不存在或无法访问。";
@@ -60,16 +60,25 @@ bool WorkspaceModel::SetRoot(const std::wstring& path, std::wstring* error) {
     node->path = full;
     node->isDir = true;
     node->expanded = true;
-    root_ = full;
-    tree_ = std::move(node);
-    if (!LoadChildren(*tree_)) {
+    // Build the new tree before replacing the old one. A permission or I/O
+    // failure must not destroy the workspace the user is already looking at.
+    if (!LoadChildren(*node)) {
         if (error) *error = L"无法读取文件夹内容。";
         return false;
     }
+    if (scanner_) scanner_->Cancel();
+    ++scanGeneration_;
+    root_ = full;
+    tree_ = std::move(node);
+    // The root direct children are already visible. Preload the next levels in
+    // the background; the UI never waits for the full three-level scan.
+    scanner_->Begin(scanGeneration_, full, 3);
     return true;
 }
 
 void WorkspaceModel::Clear() {
+    ++scanGeneration_;
+    if (scanner_) scanner_->Cancel();
     root_.clear();
     tree_.reset();
 }
@@ -85,51 +94,47 @@ bool WorkspaceModel::Contains(const std::wstring& path) const {
 
 bool WorkspaceModel::LoadChildren(Node& node) {
     node.loaded = true;
-    node.children.clear();
+    node.loading = false;
     node.error = false;
     std::wstring pattern = PathJoin(node.path, L"*");
     WIN32_FIND_DATAW fd{};
     HANDLE find = FindFirstFileExW(pattern.c_str(), FindExInfoBasic, &fd,
                                    FindExSearchNameMatch, nullptr, FIND_FIRST_EX_LARGE_FETCH);
     if (find == INVALID_HANDLE_VALUE) {
+        node.children.clear();
         node.error = true;
         return false;
     }
-    std::vector<FindData> dirs, files;
+    std::vector<CachedEntry> entries;
     do {
         std::wstring name = fd.cFileName;
         if (name == L"." || name == L"..") continue;
-        FindData item;
-        item.name = name;
-        item.path = PathJoin(node.path, name);
-        item.isDir = (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
-        // Reparse points can loop or point outside the workspace; show them as
-        // files rather than recursing into them.
-        if (item.isDir && (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT))
-            item.isDir = false;
-        (item.isDir ? dirs : files).push_back(std::move(item));
-        if (dirs.size() + files.size() >= kMaxChildren) break;
+        CachedEntry entry;
+        entry.name = std::move(name);
+        entry.isDir = (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+        if (entry.isDir && (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT))
+            entry.isDir = false;
+        entries.push_back(std::move(entry));
     } while (FindNextFileW(find, &fd));
     FindClose(find);
-    auto byName = [](const FindData& a, const FindData& b) {
-        return _wcsicmp(a.name.c_str(), b.name.c_str()) < 0;
-    };
-    std::sort(dirs.begin(), dirs.end(), byName);
-    std::sort(files.begin(), files.end(), byName);
-    for (auto& d : dirs) {
-        auto child = std::make_unique<Node>();
-        child->name = d.name;
-        child->path = d.path;
-        child->isDir = true;
-        node.children.push_back(std::move(child));
-    }
-    for (auto& f : files) {
-        auto child = std::make_unique<Node>();
-        child->name = f.name;
-        child->path = f.path;
-        node.children.push_back(std::move(child));
-    }
+    BuildChildren(node, entries);
     return true;
+}
+
+void WorkspaceModel::BuildChildren(Node& node, const std::vector<CachedEntry>& entries) {
+    node.children.clear();
+    std::vector<CachedEntry> sorted = entries;
+    std::sort(sorted.begin(), sorted.end(), EntryLess);
+    for (auto& entry : sorted) {
+        auto child = std::make_unique<Node>();
+        child->name = entry.name;
+        child->path = PathJoin(node.path, entry.name);
+        child->isDir = entry.isDir;
+        node.children.push_back(std::move(child));
+    }
+    node.loaded = true;
+    node.loading = false;
+    node.error = false;
 }
 
 WorkspaceModel::Node* WorkspaceModel::Find(Node& node, const std::wstring& path) {
@@ -138,10 +143,7 @@ WorkspaceModel::Node* WorkspaceModel::Find(Node& node, const std::wstring& path)
     for (auto& child : node.children) {
         if (!child->isDir) continue;
         if (SamePath(child->path, path)) return child.get();
-        if (IsInside(child->path, path)) {
-            if (!child->loaded) LoadChildren(*child);
-            return Find(*child, path);
-        }
+        if (IsInside(child->path, path)) return Find(*child, path);
     }
     return nullptr;
 }
@@ -150,27 +152,30 @@ bool WorkspaceModel::Toggle(const std::wstring& path) {
     if (!tree_) return false;
     Node* node = Find(*tree_, AbsolutePath(path));
     if (!node || !node->isDir) return false;
-    if (!node->expanded && !node->loaded) LoadChildren(*node);
-    node->expanded = !node->expanded;
+    if (!node->expanded) {
+        if (!node->loaded && !node->loading) {
+            std::vector<CachedEntry> entries;
+            if (scanner_->Cache().Get(scanGeneration_, node->path, entries)) {
+                BuildChildren(*node, entries);
+                scanner_->Request(scanGeneration_, node->path, 3, true);
+            } else {
+                node->loading = true;
+                scanner_->Request(scanGeneration_, node->path, 3, true);
+            }
+        } else if (node->loaded) {
+            scanner_->Request(scanGeneration_, node->path, 3, true);
+        }
+        node->expanded = true;
+    } else {
+        node->expanded = false;
+    }
     return true;
 }
 
 void WorkspaceModel::Refresh() {
     if (root_.empty() || !tree_) return;
-    std::vector<std::wstring> expanded;
-    std::function<void(const Node&)> collect = [&](const Node& node) {
-        for (auto& child : node.children) {
-            if (!child->isDir) continue;
-            if (child->expanded) {
-                expanded.push_back(child->path);
-                collect(*child);
-            }
-        }
-    };
-    collect(*tree_);
     std::wstring root = root_;
-    if (!SetRoot(root)) return;
-    for (auto& path : expanded) Reveal(path);
+    SetRoot(root);
 }
 
 bool WorkspaceModel::Reveal(const std::wstring& file) {
@@ -178,6 +183,7 @@ bool WorkspaceModel::Reveal(const std::wstring& file) {
     std::wstring full = AbsolutePath(file);
     if (!IsInside(root_, full)) return false;
     Node* node = &*tree_;
+    std::vector<Node*> pathDirs;
     size_t pos = root_.size();
     while (pos < full.size()) {
         while (pos < full.size() && (full[pos] == L'\\' || full[pos] == L'/')) pos++;
@@ -186,17 +192,61 @@ bool WorkspaceModel::Reveal(const std::wstring& file) {
         if (next == std::wstring::npos) next = full.size();
         std::wstring part = full.substr(pos, next - pos);
         if (part.empty()) break;
-        if (node->isDir && !node->loaded) LoadChildren(*node);
+        // Reveal only walks already loaded nodes. Opening a file must never
+        // trigger a deep recursive scan of the workspace.
+        if (!node->loaded) return false;
         Node* found = nullptr;
         for (auto& child : node->children) {
             if (_wcsicmp(child->name.c_str(), part.c_str()) == 0) { found = child.get(); break; }
         }
         if (!found) return false;
-        if (found->isDir) found->expanded = true;
+        if (found->isDir) pathDirs.push_back(found);
         node = found;
         pos = next;
     }
+    // Apply expansion only after the full path was found. Otherwise a failed
+    // reveal could leave a folder expanded but without loaded children.
+    for (Node* dir : pathDirs) dir->expanded = true;
     return true;
+}
+
+bool WorkspaceModel::ApplyNode(Node& node) {
+    bool changed = false;
+    if (node.isDir && node.loading) {
+        std::vector<CachedEntry> entries;
+        if (scanner_->Cache().Get(scanGeneration_, node.path, entries)) {
+            BuildChildren(node, entries);
+            changed = true;
+        }
+    }
+    for (auto& child : node.children) {
+        if (child->isDir && child->expanded) {
+            if (ApplyNode(*child)) changed = true;
+        }
+    }
+    return changed;
+}
+
+bool WorkspaceModel::ApplyCache() {
+    if (!tree_) return false;
+    return ApplyNode(*tree_);
+}
+
+bool WorkspaceModel::Scanning() const {
+    return scanner_ && scanner_->Busy();
+}
+
+bool WorkspaceModel::ContinueIdle() {
+    if (!scanner_ || root_.empty()) return false;
+    return scanner_->ContinueIdle(scanGeneration_);
+}
+
+bool WorkspaceModel::BudgetExceeded() const {
+    return scanner_ && scanner_->Cache().BudgetExceeded();
+}
+
+size_t WorkspaceModel::CachedEntries() const {
+    return scanner_ ? scanner_->Cache().EntryCount() : 0;
 }
 
 void WorkspaceModel::Collect(const Node& node, int depth, std::vector<WorkspaceRow>& out) const {
@@ -209,7 +259,17 @@ void WorkspaceModel::Collect(const Node& node, int depth, std::vector<WorkspaceR
         row.error = child->error;
         row.depth = depth;
         out.push_back(row);
-        if (child->isDir && child->expanded) Collect(*child, depth + 1, out);
+        if (child->isDir && child->expanded) {
+            if (child->loading && child->children.empty()) {
+                WorkspaceRow loading;
+                loading.name = L"正在加载…";
+                loading.loading = true;
+                loading.depth = depth + 1;
+                out.push_back(std::move(loading));
+            } else {
+                Collect(*child, depth + 1, out);
+            }
+        }
     }
 }
 

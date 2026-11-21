@@ -25,6 +25,7 @@ private:
     LRESULT Handle(UINT, WPARAM, LPARAM);
     void Paint();
     void UpdateScroll();
+    void EnsureScanTimer();
     DRect RowRect(int index) const;
     int HitRow(float x, float y) const;
     float ContentHeight() const;

@@ -54,6 +54,7 @@ bool WorkspaceView::OpenRoot(const std::wstring& path, std::wstring* error) {
     activePath_.clear();
     scroll_ = 0;
     rows_ = model_.Rows();
+    EnsureScanTimer();
     if (hwnd_) { InvalidateRect(hwnd_, nullptr, FALSE); }
     return true;
 }
@@ -62,7 +63,12 @@ void WorkspaceView::Refresh() {
     if (!model_.Valid()) return;
     model_.Refresh();
     rows_ = model_.Rows();
+    EnsureScanTimer();
     if (hwnd_) InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+void WorkspaceView::EnsureScanTimer() {
+    if (hwnd_ && model_.Scanning()) SetTimer(hwnd_, 1, 150, nullptr);
 }
 
 void WorkspaceView::SetCallbacks(std::function<void(const std::wstring&)> openFile,
@@ -137,6 +143,8 @@ void WorkspaceView::Paint() {
 
     c.DrawText(L"工作区", 12, 5, w - 60, 18, 10.5f, p.muted, true);
     std::wstring rootName = model_.Valid() ? model_.RootName() : L"未打开文件夹";
+    if (model_.BudgetExceeded()) rootName += L" · 已暂停";
+    else if (model_.Scanning()) rootName += L" · 加载中";
     c.DrawText(FitText(c, rootName, 12.0f, true, w - 74), 12, 21, w - 74, 20, 12.0f, p.fg, true, false,
                DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, false);
     DRect refresh{ w - 50, 12, 22, 22 }, close{ w - 27, 12, 22, 22 };
@@ -155,7 +163,10 @@ void WorkspaceView::Paint() {
         if (active) c.FillRound(4, r.y + 1, w - 12, kRowH - 2, 4, p.accentSoft);
         else if (hover_ == (int)i) c.FillRound(4, r.y + 1, w - 12, kRowH - 2, 4, p.hover);
         float x = 8 + rows_[i].depth * kIndent;
-        if (rows_[i].isDir) {
+        if (rows_[i].loading) {
+            c.DrawText(L"正在加载…", x, r.y, w - x - 12, kRowH, 10.5f, p.muted, false, false,
+                       DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, false);
+        } else if (rows_[i].isDir) {
             c.DrawText(rows_[i].expanded ? L"▾" : L"▸", x, r.y, 14, kRowH, 10.0f,
                        active ? p.accent : p.muted, false, false,
                        DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, false);
@@ -234,9 +245,11 @@ LRESULT WorkspaceView::Handle(UINT msg, WPARAM wp, LPARAM lp) {
         int index = HitRow(x, y);
         if (index < 0) return 0;
         const WorkspaceRow row = rows_[(size_t)index];
+        if (row.loading) return 0;
         if (row.isDir) {
             model_.Toggle(row.path);
             rows_ = model_.Rows();
+            EnsureScanTimer();
             UpdateScroll();
             InvalidateRect(hwnd_, nullptr, FALSE);
         } else if (openFile_) {
@@ -244,6 +257,26 @@ LRESULT WorkspaceView::Handle(UINT msg, WPARAM wp, LPARAM lp) {
         }
         return 0;
     }
+    case WM_TIMER:
+        if (wp == 1) {
+            bool changed = model_.ApplyCache();
+            if (changed) {
+                rows_ = model_.Rows();
+                UpdateScroll();
+            }
+            if (!model_.Scanning()) {
+                LASTINPUTINFO input{ sizeof(input) };
+                bool idle = GetLastInputInfo(&input) &&
+                            (GetTickCount() - input.dwTime) >= 2000;
+                if (idle && !model_.BudgetExceeded() && model_.ContinueIdle())
+                    changed = true;
+                else if (idle && !model_.Scanning())
+                    KillTimer(hwnd_, 1);
+            }
+            if (changed || model_.Scanning()) InvalidateRect(hwnd_, nullptr, FALSE);
+            return 0;
+        }
+        break;
     case WM_MOUSEWHEEL: {
         POINT pt{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
         ScreenToClient(hwnd_, &pt);

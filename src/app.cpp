@@ -22,6 +22,7 @@
 #include <windowsx.h>
 #include <algorithm>
 #include <cmath>
+#include <deque>
 #include <memory>
 #include <set>
 
@@ -1546,6 +1547,12 @@ private:
         bool navigation = false;
     };
 
+    struct PendingOpen {
+        std::wstring path;
+        bool addRecent = true;
+        bool activate = true;
+    };
+
     static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         MainWindow* self = (MainWindow*)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
         if (msg == WM_NCCREATE) {
@@ -2629,14 +2636,21 @@ private:
     void OpenArchive(const std::wstring& path);
 
     void OpenFile(const std::wstring& pathIn, bool addRecent, bool activate) {
-        if (pathIn.empty() || loading_) return;
+        if (pathIn.empty()) return;
+        if (loading_) {
+            if (pendingOpens_.size() < 32)
+                pendingOpens_.push_back({ pathIn, addRecent, activate });
+            return;
+        }
         std::wstring path = AbsolutePath(pathIn);
         if (DirExists(path)) {
             OpenWorkspace(path, true);
+            ProcessPendingOpens();
             return;
         }
         if (IsArchivePath(path) && FileExists(path)) {
             OpenArchive(path);
+            ProcessPendingOpens();
             return;
         }
         for (size_t i = 0; i < tabs_.size(); i++) {
@@ -2664,6 +2678,7 @@ private:
             loading_ = false;
             SetCursor(oldCursor);
             MessageBoxW(hwnd_, TranslateUi(L"无法创建文档窗口。").c_str(), L"LitheMD", MB_OK | MB_ICONWARNING);
+            ProcessPendingOpens();
             return;
         }
         view->ApplyTheme(settings_.theme);
@@ -2700,6 +2715,16 @@ private:
         } else {
             LayoutChildren();
             InvalidateChrome();
+        }
+        ProcessPendingOpens();
+    }
+
+    void ProcessPendingOpens() {
+        if (loading_) return;
+        while (!loading_ && !pendingOpens_.empty()) {
+            PendingOpen next = std::move(pendingOpens_.front());
+            pendingOpens_.pop_front();
+            OpenFile(next.path, next.addRecent, next.activate);
         }
     }
 
@@ -3106,6 +3131,7 @@ private:
     std::vector<std::wstring> initialFiles_;
     bool openSettings_ = false;
     bool loading_ = false;
+    std::deque<PendingOpen> pendingOpens_;
     bool outlineWanted_ = false;
     std::unique_ptr<DocView> home_;
     std::vector<Tab> tabs_;
