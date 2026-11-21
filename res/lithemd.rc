@@ -5,8 +5,8 @@
 2 RCDATA "vendor/pdfium/pdfium.dll"
 
 VS_VERSION_INFO VERSIONINFO
- FILEVERSION 2,4,1,4
- PRODUCTVERSION 2,4,1,4
+ FILEVERSION 2,4,1,5
+ PRODUCTVERSION 2,4,1,5
  FILEFLAGSMASK 0x3fL
 #ifdef _DEBUG
  FILEFLAGS 0x1L
@@ -23,11 +23,11 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "LitheMD"
             VALUE "FileDescription", "LitheMD local document reader"
-            VALUE "FileVersion", "2.4.1.4"
+            VALUE "FileVersion", "2.4.1.5"
             VALUE "InternalName", "lithemd"
             VALUE "OriginalFilename", "lithemd.exe"
             VALUE "ProductName", "LitheMD"
-            VALUE "ProductVersion", "2.4.1.4"
+            VALUE "ProductVersion", "2.4.1.5"
         END
     END
     BLOCK "VarFileInfo"
@@ -35,6 +35,7 @@ BEGIN
         VALUE "Translation", 0x804, 1200
     END
 END
+
 
 
 

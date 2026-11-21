@@ -31,7 +31,6 @@ namespace {
 enum : int {
     CMD_OPEN = 1001,
     CMD_OPEN_MENU,
-    CMD_WORKSPACE_MENU,
     CMD_REFRESH_WORKSPACE,
     CMD_LOCATE,
     CMD_RELOAD,
@@ -1904,7 +1903,6 @@ private:
         case CMD_OPEN_FOLDER: OpenFolderDialog(); break;
         case CMD_PATH: ShowPathDialog(); break;
         case CMD_WORKSPACE: ToggleWorkspace(); break;
-        case CMD_WORKSPACE_MENU: ShowWorkspaceMenu(); break;
         case CMD_REFRESH_WORKSPACE:
             if (workspace_.HasRoot()) {
                 workspace_.Refresh();
@@ -2365,31 +2363,18 @@ private:
         std::wstring openFolder = TranslateUi(L"打开文件夹");
         AppendMenuW(menu, MF_STRING, CMD_OPEN, openFile.c_str());
         AppendMenuW(menu, MF_STRING, CMD_OPEN_FOLDER, openFolder.c_str());
-        SetMenuDefaultItem(menu, CMD_OPEN, FALSE);
-        POINT pt{};
-        GetCursorPos(&pt);
-        SetForegroundWindow(hwnd_);
-        int command = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_LEFTALIGN | TPM_TOPALIGN,
-                                     pt.x, pt.y, 0, hwnd_, nullptr);
-        DestroyMenu(menu);
-        if (command) Command(command);
-    }
-
-    void ShowWorkspaceMenu() {
-        HMENU menu = CreatePopupMenu();
-        if (!menu) return;
-        std::wstring openFolder = TranslateUi(L"打开文件夹");
-        AppendMenuW(menu, MF_STRING, CMD_OPEN_FOLDER, openFolder.c_str());
         if (workspace_.HasRoot()) {
             AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
             std::wstring toggle = TranslateUi(settings_.workspaceVisible ? L"隐藏工作区" : L"显示工作区");
             std::wstring refresh = TranslateUi(L"刷新工作区");
-            std::wstring locate = TranslateUi(L"定位当前文件");
             AppendMenuW(menu, MF_STRING, CMD_WORKSPACE, toggle.c_str());
             AppendMenuW(menu, MF_STRING, CMD_REFRESH_WORKSPACE, refresh.c_str());
-            if (!ActivePath().empty())
+            if (!ActivePath().empty()) {
+                std::wstring locate = TranslateUi(L"定位当前文件");
                 AppendMenuW(menu, MF_STRING, CMD_LOCATE, locate.c_str());
+            }
         }
+        SetMenuDefaultItem(menu, CMD_OPEN, FALSE);
         POINT pt{};
         GetCursorPos(&pt);
         SetForegroundWindow(hwnd_);
@@ -2910,9 +2895,6 @@ private:
         addRight(CMD_INK, 46, L"画笔", L"\uE70F", true, canInk && view && view->InkMode(), canInk, 50);
         addRight(CMD_TOC, 46, L"大纲", L"\uE8FD", true, outlineWanted_,
                  active_ >= 0 && view && view->CanOutline(), 80);
-        addRight(CMD_WORKSPACE_MENU, 50, L"文件", L"\uE8B7", true, settings_.workspaceVisible,
-                 true, 75);
-        right.back().dropdown = true;
         addRight(CMD_SAVE_NOTES, 50, L"保存", L"\uE74E", true, false,
                  view && view->CanSaveNotes() && view->HasUnsavedNotes(), 20);
         addRight(CMD_EXPORT, 50, L"导出", L"", false, false,
