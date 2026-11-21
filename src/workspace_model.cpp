@@ -174,8 +174,22 @@ bool WorkspaceModel::Toggle(const std::wstring& path) {
 
 void WorkspaceModel::Refresh() {
     if (root_.empty() || !tree_) return;
+    std::vector<std::wstring> expanded;
+    for (auto& child : tree_->children) {
+        if (child->isDir && child->expanded && expanded.size() < 32)
+            expanded.push_back(child->path);
+    }
     std::wstring root = root_;
-    SetRoot(root);
+    if (!SetRoot(root)) return;
+    for (auto& path : expanded) {
+        Node* node = Find(*tree_, path);
+        if (!node || !node->isDir) continue;
+        node->expanded = true;
+        if (!node->loaded && !node->loading) {
+            node->loading = true;
+            scanner_->Request(scanGeneration_, node->path, 3, true);
+        }
+    }
 }
 
 bool WorkspaceModel::Reveal(const std::wstring& file) {
@@ -206,6 +220,40 @@ bool WorkspaceModel::Reveal(const std::wstring& file) {
     }
     // Apply expansion only after the full path was found. Otherwise a failed
     // reveal could leave a folder expanded but without loaded children.
+    for (Node* dir : pathDirs) dir->expanded = true;
+    return true;
+}
+
+bool WorkspaceModel::Locate(const std::wstring& file) {
+    if (!tree_) return false;
+    std::wstring full = AbsolutePath(file);
+    if (!IsInside(root_, full)) return false;
+    Node* node = &*tree_;
+    std::vector<Node*> pathDirs;
+    size_t pos = root_.size();
+    while (pos < full.size()) {
+        while (pos < full.size() && (full[pos] == L'\\' || full[pos] == L'/')) pos++;
+        if (pos >= full.size()) break;
+        size_t next = full.find_first_of(L"\\/", pos);
+        if (next == std::wstring::npos) next = full.size();
+        std::wstring part = full.substr(pos, next - pos);
+        if (part.empty()) break;
+        if (!node->loaded) {
+            std::vector<CachedEntry> entries;
+            if (scanner_->Cache().Get(scanGeneration_, node->path, entries))
+                BuildChildren(*node, entries);
+            else if (!LoadChildren(*node))
+                return false;
+        }
+        Node* found = nullptr;
+        for (auto& child : node->children) {
+            if (_wcsicmp(child->name.c_str(), part.c_str()) == 0) { found = child.get(); break; }
+        }
+        if (!found) return false;
+        if (found->isDir) pathDirs.push_back(found);
+        node = found;
+        pos = next;
+    }
     for (Node* dir : pathDirs) dir->expanded = true;
     return true;
 }

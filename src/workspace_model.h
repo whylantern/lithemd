@@ -31,6 +31,9 @@ public:
     bool Toggle(const std::wstring& path);
     void Refresh();
     bool Reveal(const std::wstring& file);
+    // Explicit user action: loads the path chain and expands it. This is the
+    // only operation allowed to trigger a synchronous deep path load.
+    bool Locate(const std::wstring& file);
     // True when `path` is the root or lies below it.
     bool Contains(const std::wstring& path) const;
     bool ApplyCache();

@@ -33,6 +33,7 @@ enum : int {
     CMD_OPEN_MENU,
     CMD_WORKSPACE_MENU,
     CMD_REFRESH_WORKSPACE,
+    CMD_LOCATE,
     CMD_RELOAD,
     CMD_PREVIEW,
     CMD_SOURCE,
@@ -1912,6 +1913,14 @@ private:
                 InvalidateChrome();
             }
             break;
+        case CMD_LOCATE:
+            if (!ActivePath().empty() && workspace_.HasRoot()) {
+                if (workspace_.Model().Locate(ActivePath())) {
+                    workspace_.SetActivePath(ActivePath(), false);
+                    InvalidateChrome();
+                }
+            }
+            break;
         case CMD_SPLIT: ToggleSplit(); break;
         case CMD_PRESENT: TogglePresentation(); break;
         case CMD_RELOAD: if (!ActivePath().empty()) Reload(false); break;
@@ -2375,8 +2384,11 @@ private:
             AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
             std::wstring toggle = TranslateUi(settings_.workspaceVisible ? L"隐藏工作区" : L"显示工作区");
             std::wstring refresh = TranslateUi(L"刷新工作区");
+            std::wstring locate = TranslateUi(L"定位当前文件");
             AppendMenuW(menu, MF_STRING, CMD_WORKSPACE, toggle.c_str());
             AppendMenuW(menu, MF_STRING, CMD_REFRESH_WORKSPACE, refresh.c_str());
+            if (!ActivePath().empty())
+                AppendMenuW(menu, MF_STRING, CMD_LOCATE, locate.c_str());
         }
         POINT pt{};
         GetCursorPos(&pt);
