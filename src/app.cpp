@@ -2663,6 +2663,7 @@ private:
                         if (now && now != current->fileTime) Reload(false);
                     }
                 }
+                ProcessPendingOpens();
                 return;
             }
         }
