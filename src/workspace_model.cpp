@@ -3,6 +3,7 @@
 #include <windows.h>
 #include <algorithm>
 #include <cwctype>
+#include <functional>
 
 namespace {
 
@@ -14,12 +15,18 @@ bool SamePath(const std::wstring& a, const std::wstring& b) {
 
 bool IsInside(const std::wstring& root, const std::wstring& path) {
     if (root.empty() || path.empty()) return false;
-    if (path.size() <= root.size()) return SamePath(root, path);
+    if (SamePath(root, path)) return true;
+    if (path.size() <= root.size()) return false;
     if (_wcsnicmp(root.c_str(), path.c_str(), root.size()) != 0) return false;
-    wchar_t sep = path[root.size()];
-    if (sep != L'\\' && sep != L'/') return false;
-    // Reject `root\..` style escapes.
-    std::wstring rest = path.substr(root.size());
+    bool rootHasSep = root.back() == L'\\' || root.back() == L'/';
+    size_t start = root.size();
+    if (!rootHasSep) {
+        wchar_t sep = path[root.size()];
+        if (sep != L'\\' && sep != L'/') return false;
+        start++;
+    }
+    // Reject `root\..` style escapes, including drive roots such as C:\.
+    std::wstring rest = path.substr(start);
     std::wstring part;
     for (wchar_t c : rest) {
         if (c == L'\\' || c == L'/') {
@@ -149,7 +156,21 @@ bool WorkspaceModel::Toggle(const std::wstring& path) {
 }
 
 void WorkspaceModel::Refresh() {
-    if (!root_.empty()) SetRoot(root_);
+    if (root_.empty() || !tree_) return;
+    std::vector<std::wstring> expanded;
+    std::function<void(const Node&)> collect = [&](const Node& node) {
+        for (auto& child : node.children) {
+            if (!child->isDir) continue;
+            if (child->expanded) {
+                expanded.push_back(child->path);
+                collect(*child);
+            }
+        }
+    };
+    collect(*tree_);
+    std::wstring root = root_;
+    if (!SetRoot(root)) return;
+    for (auto& path : expanded) Reveal(path);
 }
 
 bool WorkspaceModel::Reveal(const std::wstring& file) {

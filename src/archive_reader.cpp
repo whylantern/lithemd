@@ -233,6 +233,14 @@ bool IsReservedName(const std::wstring& component) {
     return false;
 }
 
+bool IsWithinRoot(const std::wstring& root, const std::wstring& path) {
+    if (root.empty() || path.empty()) return false;
+    if (path.size() <= root.size()) return false;
+    if (_wcsnicmp(root.c_str(), path.c_str(), root.size()) != 0) return false;
+    if (root.back() == L'\\' || root.back() == L'/') return true;
+    return path[root.size()] == L'\\' || path[root.size()] == L'/';
+}
+
 bool SafeEntryName(const std::wstring& name) {
     if (name.empty()) return false;
     std::wstring s = name;
@@ -488,15 +496,29 @@ bool ArchiveReader::Read(size_t index, const std::wstring& password, std::vector
         if (payloadLen > ArchiveLimits().maxEntrySize) return fail(L"条目过大");
         out.assign(payload, payload + payloadLen);
     } else if (entry.method == 8) {
-        size_t outLen = 0;
-        void* data = tinfl_decompress_mem_to_heap(payload, payloadLen, &outLen, 0);
-        if (!data) return fail(L"解压失败，密码可能不正确");
-        if (outLen > ArchiveLimits().maxEntrySize) {
-            mz_free(data);
-            return fail(L"条目过大，已停止解压");
+        struct InflateSink {
+            std::vector<uint8_t> data;
+            size_t limit = 0;
+            bool overflow = false;
+        } sink;
+        sink.limit = (size_t)ArchiveLimits().maxEntrySize;
+        auto put = [](const void* data, int len, void* user) -> int {
+            auto* sink = (InflateSink*)user;
+            if (len <= 0) return 1;
+            if (sink->data.size() + (size_t)len > sink->limit) {
+                sink->overflow = true;
+                return 0;
+            }
+            const uint8_t* bytes = (const uint8_t*)data;
+            sink->data.insert(sink->data.end(), bytes, bytes + len);
+            return 1;
+        };
+        size_t inputLen = payloadLen;
+        if (!tinfl_decompress_mem_to_callback(payload, &inputLen, put, &sink, 0)) {
+            if (sink.overflow) return fail(L"条目过大，已停止解压");
+            return fail(L"解压失败，密码可能不正确");
         }
-        out.assign((uint8_t*)data, (uint8_t*)data + outLen);
-        mz_free(data);
+        out = std::move(sink.data);
     } else {
         return fail(L"不支持的 ZIP 压缩方式");
     }
@@ -520,9 +542,9 @@ bool ArchiveReader::ExtractAll(const std::wstring& destDir, const std::wstring& 
     if (entries_.size() > ArchiveLimits().maxEntries) return fail(L"压缩包条目过多");
     uint64_t total = 0;
     for (auto& entry : entries_) {
-        if (entry.isDir) continue;
         if (!SafeEntryName(entry.name))
             return fail(L"压缩包包含不安全的路径：" + entry.name);
+        if (entry.isDir) continue;
         if (entry.size > ArchiveLimits().maxEntrySize) return fail(L"条目过大：" + entry.name);
         if (entry.compressed > 0 && entry.size / entry.compressed > ArchiveLimits().maxRatio &&
             entry.size > 16ull * 1024 * 1024)
@@ -537,18 +559,14 @@ bool ArchiveReader::ExtractAll(const std::wstring& destDir, const std::wstring& 
         if (progress && !progress(i, entry.name)) return fail(L"已取消解压");
         std::wstring rel = RelativeEntryPath(entry.name);
         std::wstring target = PathJoin(dest, rel);
-        if (entry.isDir) {
-            if (!EnsureDir(target)) return fail(L"无法创建文件夹：" + entry.name);
-            continue;
-        }
         if (!SafeEntryName(entry.name)) return fail(L"不安全的路径：" + entry.name);
         std::wstring full = AbsolutePath(target);
-        std::wstring lowerDest = ToLower(dest);
-        std::wstring lowerFull = ToLower(full);
-        if (lowerFull.size() <= lowerDest.size() + 1 ||
-            lowerFull.compare(0, lowerDest.size(), lowerDest) != 0 ||
-            (full[dest.size()] != L'\\' && full[dest.size()] != L'/'))
+        if (!IsWithinRoot(dest, full))
             return fail(L"不安全的路径：" + entry.name);
+        if (entry.isDir) {
+            if (!EnsureDir(full)) return fail(L"无法创建文件夹：" + entry.name);
+            continue;
+        }
         if (!EnsureDir(PathDir(full))) return fail(L"无法创建文件夹：" + entry.name);
         std::vector<uint8_t> data;
         std::wstring readError;

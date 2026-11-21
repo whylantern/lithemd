@@ -59,6 +59,7 @@ Platform / 第三方
 - 支持 Stored、Deflate；
 - 支持 ZipCrypto 与 WinZip AES-128/256；
 - 单条读取、全部解压、路径安全校验。
+- 所有条目（包括文件夹条目）在解压前都校验名称和目标路径；Deflate 使用带输出上限的流式回调。
 
 安全边界：
 

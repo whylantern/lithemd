@@ -3042,7 +3042,7 @@ void MainWindow::OpenArchive(const std::wstring& path) {
     auto* window = new ArchiveWindow(&settings_, path, [this](const std::wstring& temp,
                                                               const std::wstring& display) {
         OpenFile(temp, false, true);
-        if (Tab* tab = ActiveTab()) {
+        if (Tab* tab = ActiveTab(); tab && _wcsicmp(tab->path.c_str(), temp.c_str()) == 0) {
             tab->title = display;
             UpdateTitle();
             InvalidateChrome();
