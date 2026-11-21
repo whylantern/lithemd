@@ -817,7 +817,7 @@ private:
     std::set<std::wstring> selectedExts_;
     int hover_ = 0;
     float scrollY_ = 0.0f;
-    float contentHeight_ = 1780.0f;
+    float contentHeight_ = 2000.0f;
     std::wstring notice_;
 };
 
@@ -1006,9 +1006,44 @@ void SettingsWindow::Paint() {
            settings_->contentWidth > 940 && settings_->contentWidth <= 1120);
     AddBtn(56, 526, 1600, 70, 32, L"超宽", false, settings_->contentWidth > 1120);
 
-    AddBtn(13, 24, 1684, 120, 34, L"恢复默认");
-    AddBtn(14, 152, 1684, 132, 34, L"清空本地数据");
-    AddBtn(15, w - 118, 1684, 94, 34, L"关闭", true);
+    c.FillRect(24, 1660, w - 48, 1, p.border);
+    c.DrawText(L"背景图片", 24, 1672, 300, 22, 13, p.fg, true);
+    std::wstring background = settings_->backgroundImage;
+    if (background.empty()) background = L"未设置背景图片";
+    else if (!FileExists(background)) background += L"（文件不存在）";
+    background = FitText(c, background, 10.5f, false, w - 76);
+    c.FillRound(24, 1698, w - 48, 30, 6, p.surface);
+    c.StrokeRound(24, 1698, w - 48, 30, 6, p.border);
+    c.DrawText(background, 34, 1698, w - 76, 30, 10.5f, p.fg, false, true,
+               DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, false);
+    AddBtn(60, 24, 1738, 132, 34, L"选择图片");
+    AddBtn(61, 164, 1738, 104, 34, L"清除");
+    c.DrawText(L"背景不透明度", 300, 1744, 120, 20, 11.5f, p.fg, true);
+    int opacity = std::clamp(settings_->backgroundOpacity,
+                            Settings::MinBackgroundOpacity, Settings::MaxBackgroundOpacity);
+    AddBtn(62, 424, 1738, 34, 34, L"−");
+    c.StrokeRound(462, 1738, 70, 34, 6, p.border);
+    c.DrawText(std::to_wstring(opacity) + L"%", 462, 1738, 70, 34, 12, p.fg, true, false,
+               DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+    AddBtn(63, 536, 1738, 34, 34, L"+");
+    int fit = std::clamp(settings_->backgroundFit,
+                         Settings::MinBackgroundFit, Settings::MaxBackgroundFit);
+    c.DrawText(L"填充方式", 24, 1786, 80, 20, 11.5f, p.fg, true);
+    AddBtn(64, 104, 1780, 96, 32, L"铺满裁剪", fit == 0);
+    AddBtn(65, 208, 1780, 96, 32, L"完整显示", fit == 1);
+    AddBtn(66, 312, 1780, 80, 32, L"拉伸", fit == 2);
+    AddBtn(67, 400, 1780, 80, 32, L"平铺", fit == 3);
+    int anchor = std::clamp(settings_->backgroundAnchor,
+                            Settings::MinBackgroundAnchor, Settings::MaxBackgroundAnchor);
+    c.DrawText(L"裁剪位置", 24, 1828, 80, 20, 11.5f, p.fg, true);
+    const wchar_t* anchorLabels[] = { L"左上", L"上", L"右上", L"左", L"中", L"右", L"左下", L"下", L"右下" };
+    for (int i = 0; i < 9; i++)
+        AddBtn(70 + i, 104 + i * 52.0f, 1822, 46, 32, anchorLabels[i], anchor == i);
+    c.DrawText(L"5% – 60%，默认 15%；位置仅在铺满裁剪时生效", 24, 1866, w - 48, 18, 10.5f, p.muted);
+    c.FillRect(24, 1898, w - 48, 1, p.border);
+    AddBtn(13, 24, 1912, 120, 34, L"恢复默认");
+    AddBtn(14, 152, 1912, 132, 34, L"清空本地数据");
+    AddBtn(15, w - 118, 1912, 94, 34, L"关闭", true);
 
     for (auto& r : rects_) {
         if (r.enabled && r.id == hover_) c.FillRound(r.x, r.y, r.w, r.h, 7, p.hover);
@@ -1068,6 +1103,78 @@ void SettingsWindow::Click(int id) {
     case 54: settings_->contentWidth = 860; break;
     case 55: settings_->contentWidth = 1040; break;
     case 56: settings_->contentWidth = 1200; break;
+    case 60: {
+        wchar_t file[32768] = L"";
+        std::wstring filter = TranslateUi(L"图片") + L'\0' +
+            L"*.png;*.jpg;*.jpeg;*.jpe;*.jfif;*.bmp;*.gif;*.tif;*.tiff;*.webp;*.ico\0" +
+            TranslateUi(L"所有文件") + L'\0' + L"*.*\0" + L'\0';
+        std::wstring title = TranslateUi(L"选择背景图片");
+        OPENFILENAMEW ofn{};
+        ofn.lStructSize = sizeof(ofn);
+        ofn.hwndOwner = hwnd_;
+        ofn.lpstrFilter = filter.c_str();
+        ofn.lpstrFile = file;
+        ofn.nMaxFile = 32768;
+        ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_EXPLORER | OFN_NOCHANGEDIR;
+        ofn.lpstrTitle = title.c_str();
+        if (!GetOpenFileNameW(&ofn)) return;
+        WIN32_FILE_ATTRIBUTE_DATA fad{};
+        if (GetFileAttributesExW(file, GetFileExInfoStandard, &fad)) {
+            uint64_t size = ((uint64_t)fad.nFileSizeHigh << 32) | fad.nFileSizeLow;
+            if (size > 64ull * 1024 * 1024) {
+                MessageBoxW(hwnd_, TranslateUi(L"图片文件不能超过 64 MB。").c_str(), L"LitheMD",
+                            MB_OK | MB_ICONWARNING);
+                return;
+            }
+        }
+        ImageRef probe;
+        probe.path = file;
+        probe.cacheKey = L"probe:" + std::wstring(file) + L":" +
+                         std::to_wstring(FileWriteTimeUtc(file));
+        float imageW = 0, imageH = 0;
+        if (!ImagePixelSize(probe, imageW, imageH)) {
+            MessageBoxW(hwnd_, TranslateUi(L"无法读取这个图片格式，请选择 PNG、JPEG、BMP、GIF、TIFF、WEBP 或 ICO 文件。").c_str(),
+                        L"LitheMD", MB_OK | MB_ICONWARNING);
+            return;
+        }
+        if ((uint64_t)imageW * (uint64_t)imageH > 64ull * 1000 * 1000) {
+            MessageBoxW(hwnd_, TranslateUi(L"图片尺寸过大，请选择不超过 6000 万像素的图片。").c_str(),
+                        L"LitheMD", MB_OK | MB_ICONWARNING);
+            return;
+        }
+        settings_->backgroundImage = file;
+        notice_ = L"背景图片已更新。";
+        break;
+    }
+    case 61:
+        settings_->backgroundImage.clear();
+        notice_ = L"已清除背景图片。";
+        break;
+    case 62:
+        settings_->backgroundOpacity = std::max(Settings::MinBackgroundOpacity,
+                                                settings_->backgroundOpacity - 5);
+        break;
+    case 63:
+        settings_->backgroundOpacity = std::min(Settings::MaxBackgroundOpacity,
+                                                settings_->backgroundOpacity + 5);
+        break;
+    case 64:
+    case 65:
+    case 66:
+    case 67:
+        settings_->backgroundFit = id - 64;
+        break;
+    case 70:
+    case 71:
+    case 72:
+    case 73:
+    case 74:
+    case 75:
+    case 76:
+    case 77:
+    case 78:
+        settings_->backgroundAnchor = id - 70;
+        break;
     case 3: settings_->wheelStep = std::max(1, settings_->wheelStep - 1); break;
     case 4: settings_->wheelStep = std::min(10, settings_->wheelStep + 1); break;
     case 5: {
@@ -1152,8 +1259,12 @@ void SettingsWindow::Click(int id) {
         settings_->canvasWidth = 2048;
         settings_->canvasHeight = 2048;
         settings_->canvasDark = false;
+        settings_->backgroundImage.clear();
+        settings_->backgroundOpacity = Settings::DefaultBackgroundOpacity;
+        settings_->backgroundFit = 0;
+        settings_->backgroundAnchor = Settings::DefaultBackgroundAnchor;
         settings_->shortcuts.clear();
-        notice_ = L"已恢复默认（主题、滚轮速度、缩放、画笔工具按钮、快捷键）。";
+        notice_ = L"已恢复默认（主题、滚轮速度、缩放、画笔工具按钮、背景图片、快捷键）。";
         break;
     case 17: {
         if (!shortcutsWin_) {
@@ -1210,6 +1321,10 @@ void SettingsWindow::Click(int id) {
         settings_->canvasWidth = 2048;
         settings_->canvasHeight = 2048;
         settings_->canvasDark = false;
+        settings_->backgroundImage.clear();
+        settings_->backgroundOpacity = Settings::DefaultBackgroundOpacity;
+        settings_->backgroundFit = 0;
+        settings_->backgroundAnchor = Settings::DefaultBackgroundAnchor;
         settings_->shortcuts.clear();
         settings_->recent.clear();
         settings_->recentBlocked.clear();
@@ -2276,6 +2391,8 @@ private:
             v->SetZoom(settings_.zoom);
             v->SetFontScale(settings_.fontScale);
             v->SetContentWidth(settings_.contentWidth);
+            v->SetBackground(settings_.backgroundImage, settings_.backgroundOpacity,
+                             settings_.backgroundFit, settings_.backgroundAnchor);
         });
         if (home_) {
             home_->SetRecent(settings_.recent);

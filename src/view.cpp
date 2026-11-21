@@ -170,6 +170,22 @@ void DocView::SetSettings(Settings* settings) {
         wheelStep_ = settings_->wheelStep;
         recent_ = settings_->recent;
         WelcomeResetRecentPaging();
+        int opacity = std::clamp(settings_->backgroundOpacity,
+                                 Settings::MinBackgroundOpacity, Settings::MaxBackgroundOpacity);
+        int fit = std::clamp(settings_->backgroundFit,
+                             Settings::MinBackgroundFit, Settings::MaxBackgroundFit);
+        int anchor = std::clamp(settings_->backgroundAnchor,
+                                Settings::MinBackgroundAnchor, Settings::MaxBackgroundAnchor);
+        if (settings_->backgroundImage != backgroundPath_ ||
+            opacity != (int)std::lround(backgroundOpacity_ * 100.0f) ||
+            fit != backgroundFit_ || anchor != backgroundAnchor_) {
+            backgroundPath_ = settings_->backgroundImage;
+            backgroundOpacity_ = opacity / 100.0f;
+            backgroundFit_ = fit;
+            backgroundAnchor_ = anchor;
+            if (canvas_) canvas_->ClearImageCache();
+            InvalidateAll();
+        }
     }
 }
 
@@ -230,6 +246,21 @@ void DocView::SetRecent(const std::vector<std::wstring>& recent) {
 
 void DocView::SetWorkspaceHistory(const std::vector<std::wstring>& history) {
     workspaces_ = history;
+    InvalidateAll();
+}
+
+void DocView::SetBackground(const std::wstring& path, int opacity, int fit, int anchor) {
+    int nextOpacity = std::clamp(opacity, Settings::MinBackgroundOpacity, Settings::MaxBackgroundOpacity);
+    int nextFit = std::clamp(fit, Settings::MinBackgroundFit, Settings::MaxBackgroundFit);
+    int nextAnchor = std::clamp(anchor, Settings::MinBackgroundAnchor, Settings::MaxBackgroundAnchor);
+    if (path == backgroundPath_ && nextOpacity == (int)std::lround(backgroundOpacity_ * 100.0f) &&
+        nextFit == backgroundFit_ && nextAnchor == backgroundAnchor_)
+        return;
+    backgroundPath_ = path;
+    backgroundOpacity_ = nextOpacity / 100.0f;
+    backgroundFit_ = nextFit;
+    backgroundAnchor_ = nextAnchor;
+    if (canvas_) canvas_->ClearImageCache();
     InvalidateAll();
 }
 
@@ -1167,8 +1198,64 @@ void DocView::Paint() {
     if (!canvas_) canvas_ = std::make_unique<Canvas>();
     Canvas& c = *canvas_;
     if (!c.Begin(hwnd_, Palette::Get(theme_))) return;
+    PaintBackground(c);
     PaintContent(c);
     c.End();
+}
+
+void DocView::PaintBackground(Canvas& c) {
+    if (backgroundPath_.empty() || backgroundOpacity_ <= 0.001f) return;
+    ImageRef img;
+    img.path = backgroundPath_;
+    img.cacheKey = L"background:" + backgroundPath_ + L":" +
+                   std::to_wstring(FileWriteTimeUtc(backgroundPath_));
+    ID2D1Bitmap* bmp = c.Image(img);
+    if (!bmp) return;
+    D2D1_SIZE_F size = bmp->GetSize();
+    if (size.width < 1.0f || size.height < 1.0f) return;
+    float w = c.widthDip(), h = c.heightDip();
+    c.PushClip(0, 0, w, h);
+    auto draw = [&](float x, float y, float dw, float dh) {
+        c.target()->DrawBitmap(bmp, D2D1::RectF(x, y, x + dw, y + dh), backgroundOpacity_,
+                               D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+    };
+    if (backgroundFit_ == 1) {
+        // Contain: show the whole image, letterbox with the theme background.
+        float scale = std::min(w / size.width, h / size.height);
+        float dw = size.width * scale, dh = size.height * scale;
+        draw((w - dw) * 0.5f, (h - dh) * 0.5f, dw, dh);
+    } else if (backgroundFit_ == 2) {
+        // Stretch: fill the viewport, accepting aspect-ratio distortion.
+        draw(0, 0, w, h);
+    } else if (backgroundFit_ == 3) {
+        // Tile: keep the native size where possible, but enlarge tiny images so
+        // a 16x16 icon does not create thousands of draw calls.
+        float scale = 1.0f;
+        const float minTile = 128.0f;
+        if (size.width < minTile || size.height < minTile)
+            scale = std::max(minTile / size.width, minTile / size.height);
+        float tw = size.width * scale, th = size.height * scale;
+        int cols = std::max(1, (int)std::ceil(w / tw));
+        int rows = std::max(1, (int)std::ceil(h / th));
+        while ((int64_t)cols * rows > 400) {
+            scale *= 1.5f;
+            tw = size.width * scale;
+            th = size.height * scale;
+            cols = std::max(1, (int)std::ceil(w / tw));
+            rows = std::max(1, (int)std::ceil(h / th));
+        }
+        for (int row = 0; row < rows; row++)
+            for (int col = 0; col < cols; col++)
+                draw(col * tw, row * th, tw, th);
+    } else {
+        // Cover: fill the viewport and crop around the selected anchor.
+        float scale = std::max(w / size.width, h / size.height);
+        float dw = size.width * scale, dh = size.height * scale;
+        float fx = (backgroundAnchor_ % 3) / 2.0f;
+        float fy = (backgroundAnchor_ / 3) / 2.0f;
+        draw((w - dw) * fx, (h - dh) * fy, dw, dh);
+    }
+    c.PopClip();
 }
 
 void DocView::PaintContent(Canvas& c, bool exportOnly) {
@@ -1404,44 +1491,74 @@ void DocView::PaintWelcome(Canvas& c) {
     c.SetTranslateUi(true);
     float w = c.widthDip(), h = c.heightDip();
     float cx = w / 2;
-    float top = std::max(34.0f, (h - 560.0f) / 2);
+    bool compact = h < 600.0f;
+    float top = compact ? 12.0f : std::max(20.0f, (h - 560.0f) / 2);
     if (top > 120) top = 120;
 
-    c.FillRound(cx - 38, top, 76, 76, 16, c.palette().accentSoft);
-    c.DrawText(L"md", cx - 38, top + 8, 76, 60, 34, c.palette().accent, true, false,
+    float logoSize = compact ? 52.0f : 76.0f;
+    c.FillRound(cx - logoSize / 2, top, logoSize, logoSize, compact ? 12.0f : 16.0f,
+                c.palette().accentSoft);
+    c.DrawText(L"md", cx - logoSize / 2, top + (compact ? 5.0f : 8.0f), logoSize,
+               compact ? 42.0f : 60.0f, compact ? 22.0f : 34.0f, c.palette().accent, true, false,
                DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-    c.DrawText(L"LitheMD", cx - 200, top + 92, 400, 42, 32, c.palette().fg, true, false,
+    c.DrawText(L"LitheMD", cx - 200, top + (compact ? 60.0f : 92.0f), 400,
+               compact ? 30.0f : 42.0f, compact ? 24.0f : 32.0f, c.palette().fg, true, false,
                DWRITE_TEXT_ALIGNMENT_CENTER);
 
-    float btnW = 180, btnH = 42;
-    float btnX = cx - btnW / 2, btnY = top + 174;
+    float btnW = compact ? 160.0f : 180.0f;
+    float btnH = compact ? 36.0f : 42.0f;
+    float btnX = cx - btnW / 2, btnY = top + (compact ? 96.0f : 174.0f);
     welcomeOpenRect_ = { btnX, btnY, btnW, btnH };
     welcomeFolderRect_ = DRect{};
     c.FillRound(btnX, btnY, btnW, btnH, 8, c.palette().accent);
-    c.DrawText(L"打开", btnX, btnY + 1, btnW - 18, btnH - 2, 14, HexColor(L"#FFFFFF"), true, false,
-               DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+    c.DrawText(L"打开", btnX, btnY + 1, btnW - 18, btnH - 2, compact ? 13.0f : 14.0f,
+               HexColor(L"#FFFFFF"), true, false, DWRITE_TEXT_ALIGNMENT_CENTER,
+               DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
     c.DrawIcon(L"\uE70D", btnX + btnW - 30, btnY + (btnH - 14) / 2, 14, 14, 9,
                HexColor(L"#FFFFFF"));
-    c.DrawText(L"Ctrl+O 打开文件   ·   Ctrl+Shift+O 打开文件夹   ·   Ctrl+L 输入路径", cx - 360, btnY + 50, 720, 22, 12,
-               c.palette().muted, false, false, DWRITE_TEXT_ALIGNMENT_CENTER);
+    float rowW = std::min(compact ? 720.0f : 560.0f, std::max(240.0f, w - 40.0f));
+    float viewX = cx - rowW / 2;
+    bool showHint = !compact && h >= 620.0f;
+    bool showChips = !compact && h >= 680.0f;
+    if (showHint) {
+        c.DrawText(L"Ctrl+O 打开文件   ·   Ctrl+Shift+O 打开文件夹   ·   Ctrl+L 输入路径",
+                   cx - std::min(360.0f, rowW / 2), btnY + 50, std::min(720.0f, rowW), 22, 12,
+                   c.palette().muted, false, false, DWRITE_TEXT_ALIGNMENT_CENTER);
+    }
 
-    std::vector<std::wstring> chips = { L"Markdown", L"JSON", L"Notebook", L"CSV", L"PDF", L"Word", L"Excel", L"纯文本" };
-    float chipH = 24, gap = 8;
-    std::vector<float> widths;
-    float total = 0;
-    for (auto& s : chips) {
-        float cw = c.MeasureText(s, 11.5f, false, false, 500, false) + 22;
-        widths.push_back(cw);
-        total += cw;
+    float contentBottom = btnY + btnH;
+    if (showHint) contentBottom = btnY + 72.0f;
+    if (showChips) {
+        std::vector<std::wstring> chips = { L"Markdown", L"JSON", L"Notebook", L"CSV", L"PDF", L"Word", L"Excel", L"纯文本" };
+        float chipH = 24, gap = 8;
+        std::vector<float> widths;
+        for (auto& s : chips) widths.push_back(c.MeasureText(s, 11.5f, false, false, 500, false) + 22);
+        std::vector<std::vector<size_t>> rows;
+        std::vector<float> rowWidths;
+        for (size_t i = 0; i < chips.size(); i++) {
+            if (rows.empty() || rowWidths.back() + gap + widths[i] > rowW) {
+                rows.push_back({});
+                rowWidths.push_back(0);
+            }
+            if (!rows.back().empty()) rowWidths.back() += gap;
+            rows.back().push_back(i);
+            rowWidths.back() += widths[i];
+        }
+        float chipY = btnY + 92.0f;
+        for (size_t r = 0; r < rows.size(); r++) {
+            float chipX = cx - rowWidths[r] / 2;
+            for (size_t index : rows[r]) {
+                c.StrokeRound(chipX, chipY, widths[index], chipH, 12, c.palette().border);
+                c.DrawText(chips[index], chipX, chipY + 1, widths[index], chipH - 2, 11.5f,
+                           c.palette().muted, false, false, DWRITE_TEXT_ALIGNMENT_CENTER,
+                           DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+                chipX += widths[index] + gap;
+            }
+            chipY += chipH + gap;
+        }
+        contentBottom = chipY - gap;
     }
-    total += gap * (chips.size() - 1);
-    float chipX = cx - total / 2, chipY = btnY + 92;
-    for (size_t i = 0; i < chips.size(); i++) {
-        c.StrokeRound(chipX, chipY, widths[i], chipH, 12, c.palette().border);
-        c.DrawText(chips[i], chipX, chipY + 1, widths[i], chipH - 2, 11.5f, c.palette().muted, false, false,
-                   DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-        chipX += widths[i] + gap;
-    }
+    float listHeaderTop = contentBottom + (compact ? 18.0f : 30.0f);
 
     welcomeRecentRects_.clear();
     welcomeRecentDeleteRects_.clear();
@@ -1453,37 +1570,65 @@ void DocView::PaintWelcome(Canvas& c) {
     welcomeWorkspaceRects_.clear();
     welcomeWorkspacePaths_.clear();
     welcomeWorkspaceClearRect_ = DRect{};
-    float rowW = std::min(560.0f, w - 40);
-    float viewX = cx - rowW / 2;
-    int wsShown = std::min<int>(3, (int)workspaces_.size());
     const float wsRowH = 34.0f;
     const float wsHeaderH = 24.0f;
-    float wsHeight = workspaces_.empty() ? 0 : wsHeaderH + wsShown * wsRowH + 8;
-    float wsTop = h - 24 - wsHeight;
-    if (workspaces_.empty() || wsShown == 0) wsTop = h - 24;
-    float listHeaderTop = chipY + 54;
-    if (!recent_.empty()) {
+    const float bottom = h - 16.0f;
+    const float listTop = listHeaderTop + 28.0f;
+    const float minRecentH = 36.0f;
+    int wsShown = std::min<int>(3, (int)workspaces_.size());
+    auto workspaceHeight = [&](int count) {
+        return wsHeaderH + count * wsRowH + 8.0f;
+    };
+    bool twoColumn = compact && w >= 560.0f && !recent_.empty() && !workspaces_.empty();
+    float columnGap = 16.0f;
+    float recentX = viewX, recentW = rowW;
+    float workspaceX = viewX, workspaceW = rowW;
+    if (twoColumn) {
+        recentW = (rowW - columnGap) / 2;
+        workspaceW = recentW;
+        workspaceX = viewX + recentW + columnGap;
+    }
+    bool showWorkspace = false;
+    bool showRecent = false;
+    float wsTop = bottom;
+    float recentBottom = bottom;
+    if (twoColumn) {
+        while (wsShown > 0 && listHeaderTop + workspaceHeight(wsShown) > bottom) wsShown--;
+        showWorkspace = wsShown > 0;
+        showRecent = !recent_.empty() && bottom - listTop >= minRecentH;
+        wsTop = listHeaderTop;
+        recentBottom = bottom;
+    } else {
+        while (wsShown > 0 && !recent_.empty() &&
+               bottom - workspaceHeight(wsShown) - 10.0f - listTop < minRecentH)
+            wsShown--;
+        showWorkspace = wsShown > 0;
+        wsTop = showWorkspace ? bottom - workspaceHeight(wsShown) : bottom;
+        recentBottom = showWorkspace ? wsTop - 10.0f : bottom;
+        showRecent = !recent_.empty() && recentBottom - listTop >= minRecentH;
+    }
+    if (showRecent) {
         if (welcomeRecentShown_ <= 0)
             welcomeRecentShown_ = std::min((int)recent_.size(), kWelcomeRecentPage);
         welcomeRecentShown_ = std::min(welcomeRecentShown_, (int)recent_.size());
-        c.DrawText(L"最近打开", cx - 280, listHeaderTop, 560, 22, 12, c.palette().muted, true);
-        welcomeClearRect_ = { cx + 280 - 52, listHeaderTop - 2, 52, 22 };
+        c.DrawText(L"最近打开", recentX, listHeaderTop, std::max(40.0f, recentW - 58), 22, 12,
+                   c.palette().muted, true);
+        welcomeClearRect_ = { recentX + recentW - 52, listHeaderTop - 2, 52, 22 };
         c.DrawText(L"清空", welcomeClearRect_.x, welcomeClearRect_.y, welcomeClearRect_.w, welcomeClearRect_.h,
                    11, c.palette().muted, false, false,
                    DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-        float viewTop = listHeaderTop + 28;
-        float viewH = std::max(64.0f, (workspaces_.empty() ? h - 24 : wsTop - 6) - viewTop);
-        if (workspaces_.empty()) viewH = std::max(80.0f, h - viewTop - 24);
-        welcomeRecentView_ = { viewX, viewTop, rowW, viewH };
+        float viewTop = listTop;
+        float viewH = recentBottom - viewTop;
+        welcomeRecentView_ = { recentX, viewTop, recentW, viewH };
         welcomeRecentContentH_ = welcomeRecentShown_ * kWelcomeRowH + 30.0f;
         float maxScroll = std::max(0.0f, welcomeRecentContentH_ - viewH);
         welcomeRecentScroll_ = Clampf(welcomeRecentScroll_, 0, maxScroll);
 
-        c.PushClip(viewX - 2, viewTop - 2, rowW + 4, viewH + 4);
+        c.PushClip(recentX - 2, viewTop - 2, recentW + 4, viewH + 4);
         for (int i = 0; i < welcomeRecentShown_; i++) {
             float rowY = viewTop + i * kWelcomeRowH - welcomeRecentScroll_;
             if (rowY + 38 < viewTop || rowY > viewTop + viewH) continue;
-            DRect r{ viewX, rowY, rowW, 38 };
+            DRect r{ recentX, rowY, recentW, 38 };
             if (hoverWelcome_ == i) c.FillRound(r.x, r.y, r.w, r.h, 6, c.palette().hover);
             const std::wstring& p = recent_[(size_t)i];
             bool exists = FileExists(p);
@@ -1507,13 +1652,13 @@ void DocView::PaintWelcome(Canvas& c) {
         bool more = welcomeRecentShown_ < (int)recent_.size();
         if (footerY + 30 >= viewTop && footerY <= viewTop + viewH) {
             c.DrawText(more ? L"继续向下滑动加载更多" : L"已加载全部最近记录",
-                       viewX, footerY + 5, rowW, 20, 10.5f, c.palette().muted, false, false,
+                       recentX, footerY + 5, recentW, 20, 10.5f, c.palette().muted, false, false,
                        DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_NEAR, false);
         }
         c.PopClip();
 
         if (welcomeRecentContentH_ > viewH) {
-            float trackX = std::min(viewX + rowW + 6, w - 8);
+            float trackX = std::min(recentX + recentW + 6, w - 8);
             Color track = c.palette().border;
             track.a = 0.45f;
             c.FillRound(trackX, viewTop, 3, viewH, 1.5f, track);
@@ -1525,22 +1670,23 @@ void DocView::PaintWelcome(Canvas& c) {
             thumb.a = 0.55f;
             c.FillRound(trackX, thumbY, 3, thumbH, 1.5f, thumb);
         }
-    } else {
-        c.DrawText(L"打开一个文件后，最近记录会显示在这里。", cx - 280, listHeaderTop, 560, 22, 12,
+    } else if (bottom - listHeaderTop >= 24.0f) {
+        c.DrawText(L"打开一个文件后，最近记录会显示在这里。", recentX, listHeaderTop, recentW, 22, 12,
                    c.palette().muted, false, false, DWRITE_TEXT_ALIGNMENT_CENTER);
     }
 
-    if (!workspaces_.empty() && wsShown > 0) {
-        c.FillRect(viewX, wsTop - 8, rowW, 1, c.palette().border);
-        c.DrawText(L"最近工作区", cx - 280, wsTop, 240, 22, 12, c.palette().muted, true);
-        welcomeWorkspaceClearRect_ = { cx + 280 - 52, wsTop - 2, 52, 22 };
+    if (showWorkspace) {
+        c.FillRect(workspaceX, wsTop - 8, workspaceW, 1, c.palette().border);
+        c.DrawText(L"最近工作区", workspaceX, wsTop, std::max(40.0f, workspaceW - 58), 22, 12,
+                   c.palette().muted, true);
+        welcomeWorkspaceClearRect_ = { workspaceX + workspaceW - 52, wsTop - 2, 52, 22 };
         c.DrawText(L"清空", welcomeWorkspaceClearRect_.x, welcomeWorkspaceClearRect_.y,
                    welcomeWorkspaceClearRect_.w, welcomeWorkspaceClearRect_.h, 11,
                    c.palette().muted, false, false,
                    DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
         for (int i = 0; i < wsShown; i++) {
             float y = wsTop + wsHeaderH + i * wsRowH;
-            DRect r{ viewX, y, rowW, 32 };
+            DRect r{ workspaceX, y, workspaceW, 32 };
             if (hoverWorkspace_ == i) c.FillRound(r.x, r.y, r.w, r.h, 6, c.palette().hover);
             const std::wstring& p = workspaces_[(size_t)i];
             bool exists = DirExists(p);

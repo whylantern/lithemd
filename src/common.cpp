@@ -1617,6 +1617,10 @@ void Settings::Clamp() {
     fontScale = std::round(fontScale * 100.0) / 100.0;
     contentWidth = std::clamp(contentWidth, MinContentWidth, MaxContentWidth);
     if (wheelStep < MinWheelStep || wheelStep > MaxWheelStep) wheelStep = 3;
+    backgroundImage = Trim(backgroundImage);
+    backgroundOpacity = std::clamp(backgroundOpacity, MinBackgroundOpacity, MaxBackgroundOpacity);
+    backgroundFit = std::clamp(backgroundFit, MinBackgroundFit, MaxBackgroundFit);
+    backgroundAnchor = std::clamp(backgroundAnchor, MinBackgroundAnchor, MaxBackgroundAnchor);
     inkToolsVisible &= 0x7F;
     canvasWidth = std::clamp(canvasWidth, MinCanvasSize, MaxCanvasSize);
     canvasHeight = std::clamp(canvasHeight, MinCanvasSize, MaxCanvasSize);
@@ -1717,6 +1721,14 @@ Settings Settings::Load() {
                     std::wstring v = ToLower(NodeText(&m.second));
                     s.workspaceVisible = (v == L"true" || v == L"1");
                 }
+                else if (key == L"backgroundimage" || key == L"background")
+                    s.backgroundImage = NodeText(&m.second);
+                else if (key == L"backgroundopacity" || key == L"backgroundalpha")
+                    s.backgroundOpacity = (int)m.second.number;
+                else if (key == L"backgroundfit" || key == L"backgroundmode")
+                    s.backgroundFit = (int)m.second.number;
+                else if (key == L"backgroundanchor" || key == L"backgroundposition")
+                    s.backgroundAnchor = (int)m.second.number;
                 else if (key == L"wheelstep" || key == L"wheelsteps") s.wheelStep = (int)m.second.number;
                 else if (key == L"inktools" || key == L"inktoolsvisible")
                     s.inkToolsVisible = (int)m.second.number;
@@ -1835,6 +1847,10 @@ bool Settings::Save() {
     out += L"],\n";
     out += L"  \"workspaceRoot\": " + JsonEscape(workspaceRoot) + L",\n";
     out += std::wstring(L"  \"workspaceVisible\": ") + (workspaceVisible ? L"true" : L"false") + L",\n";
+    out += L"  \"backgroundImage\": " + JsonEscape(backgroundImage) + L",\n";
+    out += L"  \"backgroundOpacity\": " + std::to_wstring(backgroundOpacity) + L",\n";
+    out += L"  \"backgroundFit\": " + std::to_wstring(backgroundFit) + L",\n";
+    out += L"  \"backgroundAnchor\": " + std::to_wstring(backgroundAnchor) + L",\n";
     out += L"  \"wheelStep\": " + std::to_wstring(wheelStep) + L",\n";
     out += L"  \"inkToolsVisible\": " + std::to_wstring(inkToolsVisible) + L",\n";
     out += L"  \"canvasWidth\": " + std::to_wstring(canvasWidth) + L",\n";

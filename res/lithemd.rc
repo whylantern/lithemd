@@ -1,12 +1,12 @@
-﻿#include <windows.h>
+#include <windows.h>
 
 1 ICON "assets/lithemd.ico"
 1 RT_MANIFEST "app.manifest"
 2 RCDATA "vendor/pdfium/pdfium.dll"
 
 VS_VERSION_INFO VERSIONINFO
- FILEVERSION 2,4,1,5
- PRODUCTVERSION 2,4,1,5
+ FILEVERSION 2,4,2,0
+ PRODUCTVERSION 2,4,2,0
  FILEFLAGSMASK 0x3fL
 #ifdef _DEBUG
  FILEFLAGS 0x1L
@@ -23,11 +23,11 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "LitheMD"
             VALUE "FileDescription", "LitheMD local document reader"
-            VALUE "FileVersion", "2.4.1.5"
+            VALUE "FileVersion", "2.4.2.0"
             VALUE "InternalName", "lithemd"
             VALUE "OriginalFilename", "lithemd.exe"
             VALUE "ProductName", "LitheMD"
-            VALUE "ProductVersion", "2.4.1.5"
+            VALUE "ProductVersion", "2.4.2.0"
         END
     END
     BLOCK "VarFileInfo"

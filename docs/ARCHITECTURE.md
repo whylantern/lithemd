@@ -68,6 +68,15 @@ Platform / 第三方
 - 每 256 个条目检查取消/生成号，避免大目录无法及时退出。
 - UI 每 150 ms 合并一次缓存结果，不为每个目录刷新窗口。
 
+### 2.2.2 Background image（`view.*`、`common.*`、`app.cpp`）
+
+- 设置保存 `backgroundImage`、`backgroundOpacity`、`backgroundFit`、`backgroundAnchor`。
+- 整图导入，不修改原图；支持 WIC 可解码的 PNG/JPEG/BMP/GIF/TIFF/WEBP/ICO。
+- 填充方式：铺满裁剪、完整显示、拉伸、平铺；铺满裁剪支持 3×3 裁剪位置。
+- 每次绘制按当前视口尺寸重新计算，不保存固定像素尺寸。
+- 透明度限制 5%–60%，默认 15%；导入时限制 64 MB / 6,000 万像素。
+- 背景在正文之前绘制；导出默认不包含背景。
+
 ### 2.3 ArchiveReader（`archive_reader.*`）
 
 职责：

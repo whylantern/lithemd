@@ -66,6 +66,7 @@ public:
     void SetWheelStep(int step);
     void SetRecent(const std::vector<std::wstring>& recent);
     void SetWorkspaceHistory(const std::vector<std::wstring>& history);
+    void SetBackground(const std::wstring& path, int opacity, int fit, int anchor);
 
     void SetDocument(std::unique_ptr<Document> doc, bool preserveScroll = false,
                      bool preserveInk = false);
@@ -136,6 +137,10 @@ private:
 
     bool dark_ = false;
     std::wstring theme_ = L"blue";
+    std::wstring backgroundPath_;
+    float backgroundOpacity_ = 0.15f;
+    int backgroundFit_ = 0;
+    int backgroundAnchor_ = 4;
     bool sourceMode_ = false;
     double zoom_ = 1.0;
     double fontScale_ = 1.0;
@@ -429,6 +434,7 @@ private:
     const std::vector<Color>& InkPalette() const { return inkColors_; }
     void PaintInk(class Canvas& c, bool exportOnly = false);
     void PaintContent(class Canvas& c, bool exportOnly = false);
+    void PaintBackground(class Canvas& c);
     void PaintInkToolbar(class Canvas& c);
     bool InkHitButton(float x, float y, int& action) const;
     void InkAction(int action);

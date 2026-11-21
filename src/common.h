@@ -187,6 +187,10 @@ struct Settings {
     std::vector<std::wstring> workspaceHistory;
     std::wstring workspaceRoot;
     bool workspaceVisible = false;
+    std::wstring backgroundImage;
+    int backgroundOpacity = 15;
+    int backgroundFit = 0; // 0 cover, 1 contain, 2 stretch, 3 tile
+    int backgroundAnchor = 4; // 3x3 crop anchor, 4 = center
     std::wstring configPath;
     DocLanguage documentLanguage = DocLanguage::Auto;
     // Only user overrides are stored. Missing commands use built-in defaults;
@@ -213,6 +217,14 @@ struct Settings {
     std::wstring uiLanguage = L"zh-CN";
     static constexpr int MinCanvasSize = 256;
     static constexpr int MaxCanvasSize = 8192;
+    static constexpr int MinBackgroundOpacity = 5;
+    static constexpr int MaxBackgroundOpacity = 60;
+    static constexpr int DefaultBackgroundOpacity = 15;
+    static constexpr int MinBackgroundFit = 0;
+    static constexpr int MaxBackgroundFit = 3;
+    static constexpr int MinBackgroundAnchor = 0;
+    static constexpr int MaxBackgroundAnchor = 8;
+    static constexpr int DefaultBackgroundAnchor = 4;
     static constexpr double MinFontScale = 0.85;
     static constexpr double MaxFontScale = 1.35;
     static constexpr int MinContentWidth = 680;
