@@ -29,6 +29,7 @@ const std::map<std::wstring, std::wstring>& EnglishMap() {
 
         { L"外观", L"Appearance" }, { L"滚轮速度", L"Wheel speed" },
         { L"背景图片", L"Background image" }, { L"选择图片", L"Choose image" },
+        { L"许可与贡献者", L"License & contributors" },
         { L"选择背景图片", L"Choose background image" },
         { L"未设置背景图片", L"No background image" },
         { L"（文件不存在）", L" (file missing)" },

@@ -1525,11 +1525,11 @@ DocView::WelcomeMetrics DocView::ComputeWelcomeMetrics(float viewW, float viewH)
         m.workspaceW = m.recentW;
         m.recentX = m.viewX;
         m.workspaceX = m.recentX + m.recentW + kHomeGap;
-        m.contentH = m.cardsTop + std::max(m.recentH, m.workspaceH) + 70.0f;
+        m.contentH = m.cardsTop + std::max(m.recentH, m.workspaceH) + 24.0f;
     } else {
         m.recentX = m.workspaceX = m.viewX;
         m.recentW = m.workspaceW = m.contentW;
-        m.contentH = m.cardsTop + m.recentH + kHomeGap + m.workspaceH + 70.0f;
+        m.contentH = m.cardsTop + m.recentH + kHomeGap + m.workspaceH + 24.0f;
     }
     return m;
 }
@@ -1781,15 +1781,6 @@ void DocView::PaintWelcome(Canvas& c) {
 
     c.ResetTransform();
     c.PopClip();
-
-    Color footerBg = p.bg;
-    footerBg.a = 0.82f;
-    c.FillRect(0, h - 24, w, 24, footerBg);
-    std::wstring footer = std::wstring(L"LitheMD ") + kAppVersion +
-                          L"  ·  MIT License  ·  © 2026 LitheMD";
-    c.DrawText(footer, cx - std::min(300.0f, w / 2 - 12), h - 22,
-               std::min(600.0f, w - 24), 18, 10, p.muted, false, false,
-               DWRITE_TEXT_ALIGNMENT_CENTER);
 }
 
 void DocView::PaintError(Canvas& c) {

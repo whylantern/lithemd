@@ -59,6 +59,7 @@ enum : int {
     CMD_SCROLL_HOME,
     CMD_SCROLL_END,
     CMD_SAVE_NOTES,
+    CMD_CLEAR_ANNOTATIONS,
     CMD_PASTE_INK,
     CMD_DELETE_INK,
     CMD_GROUP_INK,
@@ -192,15 +193,74 @@ std::wstring FitText(Canvas& c, const std::wstring& text, float size, bool bold,
     return L"…";
 }
 
+HICON CreateGearIcon(int size) {
+    if (size < 8 || size > 64) return nullptr;
+    BITMAPINFO bmi{};
+    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bmi.bmiHeader.biWidth = size;
+    bmi.bmiHeader.biHeight = -size;
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
+    void* pixels = nullptr;
+    HDC screen = GetDC(nullptr);
+    HBITMAP color = CreateDIBSection(screen, &bmi, DIB_RGB_COLORS, &pixels, nullptr, 0);
+    HDC dc = CreateCompatibleDC(screen);
+    if (screen) ReleaseDC(nullptr, screen);
+    if (!color || !dc || !pixels) {
+        if (color) DeleteObject(color);
+        if (dc) DeleteDC(dc);
+        return nullptr;
+    }
+    HGDIOBJ oldBitmap = SelectObject(dc, color);
+    RECT rc{ 0, 0, size, size };
+    HBRUSH black = CreateSolidBrush(RGB(0, 0, 0));
+    FillRect(dc, &rc, black);
+    DeleteObject(black);
+    SetBkMode(dc, TRANSPARENT);
+    SetTextColor(dc, RGB(255, 255, 255));
+    HFONT font = CreateFontW(-MulDiv(size, 82, 100), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                             DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                             CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe MDL2 Assets");
+    HGDIOBJ oldFont = SelectObject(dc, font);
+    DrawTextW(dc, L"\uE713", -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    SelectObject(dc, oldFont);
+    DeleteObject(font);
+    SelectObject(dc, oldBitmap);
+    DeleteDC(dc);
+
+    uint8_t* p = (uint8_t*)pixels;
+    for (int i = 0; i < size * size; i++) {
+        uint8_t alpha = std::max({ p[i * 4], p[i * 4 + 1], p[i * 4 + 2] });
+        p[i * 4] = 0xED;
+        p[i * 4 + 1] = 0x6F;
+        p[i * 4 + 2] = 0x2F;
+        p[i * 4 + 3] = alpha;
+    }
+    std::vector<uint8_t> maskBits((size_t)(((size + 15) / 16) * 2) * size, 0);
+    HBITMAP mask = CreateBitmap(size, size, 1, 1, maskBits.data());
+    ICONINFO info{};
+    info.fIcon = TRUE;
+    info.hbmColor = color;
+    info.hbmMask = mask;
+    HICON icon = CreateIconIndirect(&info);
+    if (mask) DeleteObject(mask);
+    DeleteObject(color);
+    return icon;
+}
+
 HICON SettingsWindowIcon(bool small) {
     static HICON largeIcon = nullptr;
     static HICON smallIcon = nullptr;
     HICON& icon = small ? smallIcon : largeIcon;
     if (icon) return icon;
-    SHSTOCKICONINFO info{};
-    info.cbSize = sizeof(info);
-    UINT flags = SHGSI_ICON | (small ? SHGSI_SMALLICON : SHGSI_LARGEICON);
-    if (SUCCEEDED(SHGetStockIconInfo(SIID_SETTINGS, flags, &info))) icon = info.hIcon;
+    icon = CreateGearIcon(small ? 16 : 32);
+    if (!icon) {
+        SHSTOCKICONINFO info{};
+        info.cbSize = sizeof(info);
+        UINT flags = SHGSI_ICON | (small ? SHGSI_SMALLICON : SHGSI_LARGEICON);
+        if (SUCCEEDED(SHGetStockIconInfo(SIID_SETTINGS, flags, &info))) icon = info.hIcon;
+    }
     if (!icon) icon = LoadIconW(nullptr, IDI_APPLICATION);
     return icon;
 }
@@ -257,6 +317,42 @@ bool IsManagedBackground(const Settings& settings, const std::wstring& path, con
 
 void DeleteManagedBackground(const Settings& settings, const std::wstring& path, const std::wstring& id) {
     if (IsManagedBackground(settings, path, id)) DeleteFileW(path.c_str());
+}
+
+bool IsManagedBackgroundName(const std::wstring& name) {
+    std::wstring lower = ToLower(name);
+    std::wstring ext = PathExt(lower);
+    if (ext != L".png" && ext != L".jpg" && ext != L".jpeg" && ext != L".jpe" &&
+        ext != L".jfif" && ext != L".bmp" && ext != L".gif" && ext != L".tif" &&
+        ext != L".tiff" && ext != L".webp" && ext != L".ico" && ext != L".img")
+        return false;
+    size_t dot = lower.find_last_of(L'.');
+    if (dot == std::wstring::npos) return false;
+    size_t dash = lower.rfind(L'-', dot);
+    if (dash == std::wstring::npos || dot - dash - 1 != 16) return false;
+    for (size_t i = dash + 1; i < dot; i++) {
+        wchar_t c = lower[i];
+        if (!((c >= L'0' && c <= L'9') || (c >= L'a' && c <= L'f'))) return false;
+    }
+    return true;
+}
+
+void DeleteBackgroundCopiesInDir(const std::wstring& dir) {
+    if (dir.empty() || !DirExists(dir)) return;
+    WIN32_FIND_DATAW fd{};
+    HANDLE find = FindFirstFileW((PathJoin(dir, L"*")).c_str(), &fd);
+    if (find == INVALID_HANDLE_VALUE) return;
+    do {
+        std::wstring name = fd.cFileName;
+        if (name == L"." || name == L"..") continue;
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+        if (IsManagedBackgroundName(name)) {
+            std::wstring full = PathJoin(dir, name);
+            SetFileAttributesW(full.c_str(), FILE_ATTRIBUTE_NORMAL);
+            DeleteFileW(full.c_str());
+        }
+    } while (FindNextFileW(find, &fd));
+    FindClose(find);
 }
 
 bool CopyBackgroundToConfig(Settings& settings, const std::wstring& source, std::wstring& error) {
@@ -811,7 +907,8 @@ public:
         wc.hIconSm = SettingsWindowIcon(true);
         wc.lpszClassName = L"LitheMdSettings";
         RegisterClassExW(&wc);
-        DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN | WS_VSCROLL;
+        DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME |
+                      WS_MINIMIZEBOX | WS_CLIPCHILDREN | WS_VSCROLL;
         UINT dpi = GetDpiForWindow(owner);
         if (!dpi) dpi = 96;
         float sc = dpi / 96.0f;
@@ -940,6 +1037,8 @@ private:
     bool opacityReplace_ = true;
     std::wstring opacityInput_;
     std::wstring opacityError_;
+    bool aboutExpanded_ = false;
+    DRect contributorLinkRect_;
 };
 
 void SettingsWindow::Paint() {
@@ -950,6 +1049,10 @@ void SettingsWindow::Paint() {
     auto& p = c.palette();
     float w = c.widthDip(), h = c.heightDip();
     c.FillRect(0, 0, w, h, p.bg);
+    const float aboutY = 1978.0f;
+    float footerY = aboutY + 48.0f;
+    if (aboutExpanded_) footerY += 400.0f + 12.0f + 100.0f + 12.0f;
+    contentHeight_ = footerY + 36.0f;
     float maxScroll = std::max(0.0f, contentHeight_ - h);
     scrollY_ = Clampf(scrollY_, 0.0f, maxScroll);
     UINT dpi = GetDpiForWindow(hwnd_);
@@ -1091,9 +1194,9 @@ void SettingsWindow::Paint() {
         L"Windows-1252", L"Windows-1251", L"Windows-1250", L"Latin-1", L"ANSI"
     };
     for (int i = 0; i < 15; i++) {
-        float x = 24 + (i % 4) * 150.0f;
+        float x = 24 + (i % 4) * 144.0f;
         float y = 1168 + (i / 4) * 36.0f;
-        AddBtn(100 + i, x, y, 140, 32, encLabels[i], false, encOk);
+        AddBtn(100 + i, x, y, 132, 32, encLabels[i], false, encOk);
     }
 
     c.DrawText(L"文档语言", 24, 1328, 160, 20, 11.5f, p.fg, true);
@@ -1169,9 +1272,55 @@ void SettingsWindow::Paint() {
     AddBtn(13, 24, 1928, 120, 34, L"恢复默认");
     AddBtn(14, 152, 1928, 132, 34, L"清空本地数据");
     AddBtn(15, w - 118, 1928, 94, 34, L"关闭", true);
+
+    AddBtn(80, 24, aboutY, w - 48, 34, L"许可与贡献者");
+    if (aboutExpanded_) {
+        float cardX = 24, cardW = w - 48;
+        float licenseY = aboutY + 48.0f;
+        c.FillRound(cardX, licenseY, cardW, 400, 10, p.surface);
+        c.StrokeRound(cardX, licenseY, cardW, 400, 10, p.border);
+        c.DrawText(L"License", cardX + 16, licenseY + 14, 200, 22, 13, p.fg, true);
+        static const wchar_t* licenseText = LR"LIC(MIT License
+
+Copyright (c) 2026 LitheMD contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.)LIC";
+        c.DrawText(licenseText, cardX + 16, licenseY + 42, cardW - 32, 342, 10.5f,
+                   p.muted, false, false, DWRITE_TEXT_ALIGNMENT_LEADING,
+                   DWRITE_PARAGRAPH_ALIGNMENT_NEAR, true);
+        float contributorY = licenseY + 412.0f;
+        c.FillRound(cardX, contributorY, cardW, 100, 10, p.surface);
+        c.StrokeRound(cardX, contributorY, cardW, 100, 10, p.border);
+        c.DrawText(L"Contributor", cardX + 16, contributorY + 14, 220, 22, 13, p.fg, true);
+        c.DrawText(L"Bright_lantern", cardX + 16, contributorY + 42, 260, 22, 13,
+                   p.fg, true, false);
+        contributorLinkRect_ = { cardX + 16, contributorY + 66, 280, 22 };
+        c.DrawText(L"GitHub  @whylantern", contributorLinkRect_.x, contributorLinkRect_.y,
+                   contributorLinkRect_.w, contributorLinkRect_.h, 11.5f, p.accent,
+                   false, false, DWRITE_TEXT_ALIGNMENT_LEADING,
+                   DWRITE_PARAGRAPH_ALIGNMENT_CENTER, false);
+    } else {
+        contributorLinkRect_ = DRect{};
+    }
     std::wstring footer = std::wstring(L"LitheMD ") + kAppVersion +
                           L"  ·  MIT License  ·  © 2026 LitheMD";
-    c.DrawText(footer, 24, 1974, w - 48, 18, 10, p.muted, false, false,
+    c.DrawText(footer, 24, footerY, w - 48, 18, 10, p.muted, false, false,
                DWRITE_TEXT_ALIGNMENT_CENTER);
 
     for (auto& r : rects_) {
@@ -1260,6 +1409,15 @@ void SettingsWindow::Click(int id) {
     bool persist = true;
     if (id == 68) {
         BeginOpacityEdit();
+        return;
+    }
+    if (id == 80) {
+        aboutExpanded_ = !aboutExpanded_;
+        contributorLinkRect_ = DRect{};
+        if (hwnd_) {
+            InvalidateRect(hwnd_, nullptr, FALSE);
+            UpdateWindow(hwnd_);
+        }
         return;
     }
     opacityError_.clear();
@@ -1506,21 +1664,36 @@ void SettingsWindow::Click(int id) {
         break;
     }
     case 14: {
-        if (MessageBoxW(hwnd_, TranslateUi(L"将删除本地配置、最近记录和配置缓存。已打开的文件不会被删除。\n\n是否继续？").c_str(),
+        if (MessageBoxW(hwnd_, TranslateUi(L"将删除本地配置、最近记录、背景图片副本和笔迹注释。已打开的文件不会被删除。\n\n是否继续？").c_str(),
                         TranslateUi(L"清空本地数据").c_str(), MB_YESNO | MB_ICONWARNING) != IDYES)
             return;
+        std::wstring cfgPath = settings_->configPath.empty()
+            ? Settings::ResolveConfigPath() : settings_->configPath;
+        std::wstring cfgDir = PathDir(cfgPath);
+        std::wstring localDir = LocalDataDir();
         DeleteManagedBackground(*settings_, settings_->backgroundImage,
                                 settings_->backgroundImageId);
-        std::wstring localDir = LocalDataDir();
+        DeleteBackgroundCopiesInDir(cfgDir);
+        if (_wcsicmp(cfgDir.c_str(), localDir.c_str()) != 0)
+            DeleteBackgroundCopiesInDir(localDir);
+        RemoveTree(PathJoin(cfgDir, L"lithemd-notes"));
+        RemoveTree(PathJoin(cfgDir, L"openmd-notes"));
+        if (_wcsicmp(cfgDir.c_str(), localDir.c_str()) != 0) {
+            RemoveTree(PathJoin(localDir, L"lithemd-notes"));
+            RemoveTree(PathJoin(localDir, L"openmd-notes"));
+        }
+        RemoveTree(PathJoin(localDir, L"preview"));
         std::vector<std::wstring> paths = {
             PathJoin(localDir, L"config.json"),
             PathJoin(localDir, L"state.ini"),
-            PathJoin(localDir, L"reading-positions.json")
+            PathJoin(localDir, L"reading-positions.json"),
+            PathJoin(cfgDir, L"reading-positions.json"),
+            cfgPath
         };
-        if (!settings_->configPath.empty()) paths.push_back(settings_->configPath);
         for (auto& path : paths) {
             if (FileExists(path)) DeleteFileW(path.c_str());
         }
+        if (command_) command_(CMD_CLEAR_ANNOTATIONS);
         RemoveDirectoryW(localDir.c_str());
         settings_->theme = L"blue";
         settings_->dark = false;
@@ -1624,8 +1797,9 @@ LRESULT SettingsWindow::Handle(UINT msg, WPARAM wp, LPARAM lp) {
         bool overCheck = false;
         for (auto& ch : checks_) if (ch.rect.Contains(x, y)) { overCheck = true; break; }
         for (auto& ch : toolChecks_) if (ch.rect.Contains(x, y)) { overCheck = true; break; }
+        bool overLink = aboutExpanded_ && contributorLinkRect_.Contains(x, y);
         if (hover != hover_) { hover_ = hover; InvalidateRect(hwnd_, nullptr, FALSE); }
-        SetCursor(LoadCursorW(nullptr, (hover || overCheck) ? IDC_HAND : IDC_ARROW));
+        SetCursor(LoadCursorW(nullptr, (hover || overCheck || overLink) ? IDC_HAND : IDC_ARROW));
         TRACKMOUSEEVENT tme{ sizeof(tme), TME_LEAVE, hwnd_, 0 };
         TrackMouseEvent(&tme);
         return 0;
@@ -1639,6 +1813,11 @@ LRESULT SettingsWindow::Handle(UINT msg, WPARAM wp, LPARAM lp) {
         float x = GET_X_LPARAM(lp) / scale, y = GET_Y_LPARAM(lp) / scale + scrollY_;
         if (opacityEditing_ && !OpacityValueRect().Contains(x, y))
             CommitOpacityEdit(false);
+        if (aboutExpanded_ && contributorLinkRect_.Contains(x, y)) {
+            ShellExecuteW(nullptr, L"open", L"https://github.com/whylantern", nullptr, nullptr,
+                          SW_SHOWNORMAL);
+            return 0;
+        }
         for (auto& ch : toolChecks_) {
             if (ch.rect.Contains(x, y)) {
                 if (ch.toolIndex >= 0) {
@@ -1668,6 +1847,15 @@ LRESULT SettingsWindow::Handle(UINT msg, WPARAM wp, LPARAM lp) {
             }
         }
         for (auto& r : rects_) if (r.Contains(x, y)) { if (r.enabled) Click(r.id); break; }
+        return 0;
+    }
+    case WM_GETMINMAXINFO: {
+        auto* mmi = (MINMAXINFO*)lp;
+        UINT dpi = GetDpiForWindow(hwnd_);
+        if (!dpi) dpi = 96;
+        float scale = dpi / 96.0f;
+        mmi->ptMinTrackSize.x = (LONG)std::lround(620 * scale);
+        mmi->ptMinTrackSize.y = (LONG)std::lround(500 * scale);
         return 0;
     }
     case WM_SIZE:
@@ -2345,6 +2533,10 @@ private:
             break;
         case CMD_REDO_INK:
             if (DocView* v = ActiveView()) v->RedoInk();
+            break;
+        case CMD_CLEAR_ANNOTATIONS:
+            ForEachView([](DocView* v) { v->ClearAnnotations(); });
+            InvalidateChrome();
             break;
         case CMD_SAVE_NOTES:
             if (DocView* v = ActiveView(); v && v->CanSaveNotes() && v->HasUnsavedNotes()) {

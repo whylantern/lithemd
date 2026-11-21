@@ -72,6 +72,7 @@ public:
                      bool preserveInk = false);
     void SetError(const std::wstring& message, const std::wstring& path, const std::wstring& sourceText);
     void ClearDocument();
+    void ClearAnnotations();
     void SetSource(bool source);
     bool IsSource() const { return sourceMode_; }
     bool CanSource() const;

@@ -191,6 +191,21 @@ std::wstring DocView::NotesPath() const {
     return PathJoin(fresh, name);
 }
 
+void DocView::ClearAnnotations() {
+    if (inkEdit_) InkCommitText();
+    inkLayers_.clear();
+    pdfHighlights_.clear();
+    textHighlights_.clear();
+    inkSelection_.clear();
+    inkLassoing_ = false;
+    inkLasso_.clear();
+    pdfHighlighting_ = false;
+    notesDirty_ = false;
+    notesError_.clear();
+    InvalidateAll();
+    if (events_.statusChanged) events_.statusChanged();
+}
+
 void DocView::MarkNotesDirty() {
     if (!notesDirty_) {
         notesDirty_ = true;
