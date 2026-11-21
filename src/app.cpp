@@ -1070,8 +1070,7 @@ void SettingsWindow::Paint() {
     c.SetTransform(0, -scrollY_);
     rects_.clear();
     checks_.clear();
-    c.DrawIcon(L"\uE713", 24, 14, 28, 28, 19, p.accent);
-    c.DrawText(L"设置", 56, 16, 300, 34, 23, p.fg, true);
+    c.DrawText(L"设置", 24, 16, 300, 34, 23, p.fg, true);
     c.FillRect(24, 78, w - 48, 1, p.border);
 
     c.DrawText(L"外观", 24, 94, 120, 22, 13, p.fg, true);
