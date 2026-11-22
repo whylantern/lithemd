@@ -828,25 +828,28 @@ void DrawDelimiter(ID2D1RenderTarget* target, ID2D1SolidColorBrush* brush, wchar
     } else if (ch == L'{') {
         // Take the original (correct-looking) upper lobe, flip it horizontally
         // so its tip opens toward the content, and mirror that curve below.
-        begin(x + braceW, top);
+        // The tip overhang is slightly wider so the top/bottom curls flare out.
+        float tip = x + braceW * 1.08f;
+        begin(tip, top);
         sink->AddBezier(D2D1::BezierSegment(
-            D2D1::Point2F(x, top),
+            D2D1::Point2F(x - braceW * 0.02f, top),
             D2D1::Point2F(x + braceW * 0.85f, top + height * 0.25f),
             D2D1::Point2F(x + braceW * 0.25f, top + height * 0.5f)));
         sink->AddBezier(D2D1::BezierSegment(
             D2D1::Point2F(x + braceW * 0.85f, bottom - height * 0.25f),
-            D2D1::Point2F(x, bottom),
-            D2D1::Point2F(x + braceW, bottom)));
+            D2D1::Point2F(x - braceW * 0.02f, bottom),
+            D2D1::Point2F(tip, bottom)));
     } else if (ch == L'}') {
-        begin(x - braceW, top);
+        float tip = x - braceW * 1.08f;
+        begin(tip, top);
         sink->AddBezier(D2D1::BezierSegment(
-            D2D1::Point2F(x, top),
+            D2D1::Point2F(x + braceW * 0.02f, top),
             D2D1::Point2F(x - braceW * 0.85f, top + height * 0.25f),
             D2D1::Point2F(x - braceW * 0.25f, top + height * 0.5f)));
         sink->AddBezier(D2D1::BezierSegment(
             D2D1::Point2F(x - braceW * 0.85f, bottom - height * 0.25f),
-            D2D1::Point2F(x, bottom),
-            D2D1::Point2F(x - braceW, bottom)));
+            D2D1::Point2F(x + braceW * 0.02f, bottom),
+            D2D1::Point2F(tip, bottom)));
     } else if (ch == L'⌊') {
         begin(x, top);
         sink->AddLine(D2D1::Point2F(x, bottom));
