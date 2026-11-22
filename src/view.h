@@ -407,6 +407,7 @@ private:
     void ImageDisplaySize(float viewW, float viewH, float& outW, float& outH) const;
     void BeginMiddlePan(int px, int py);
     void UpdateMiddlePan(int px, int py);
+    void AdvanceMiddlePan();
     void EndMiddlePan();
     void UpdateCopyHover(float x, float y);
     void DrawCopyButton(class Canvas& c);

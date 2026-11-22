@@ -2714,8 +2714,41 @@ void DocView::UpdateMiddlePan(int px, int py) {
     panCurrent_.x = (LONG)std::lround(px / scale);
     panCurrent_.y = (LONG)std::lround(py / scale);
     SetCursor(LoadCursorW(nullptr, IDC_SIZEALL));
-    // The animation timer repaints at a stable cadence. Invalidating from
-    // every mouse move adds duplicate frames and starves WM_TIMER.
+    // High-rate mice can starve the 10 ms timer with mouse-move messages.
+    // Advance from the move path as well, but keep an 8 ms floor so a single
+    // frame is not invalidated multiple times for one display refresh.
+    if (GetTickCount64() - panLastTick_ >= 8) AdvanceMiddlePan();
+}
+
+void DocView::AdvanceMiddlePan() {
+    if (!middlePan_) return;
+    ULONGLONG now = GetTickCount64();
+    float dt = (now - panLastTick_) / 1000.0f;
+    if (dt < 0.008f) return;
+    panLastTick_ = now;
+    dt = Clampf(dt, 0.008f, 0.05f);
+    float dx = (float)(panCurrent_.x - panAnchor_.x);
+    float dy = (float)(panCurrent_.y - panAnchor_.y);
+    const float deadZone = 15.0f;
+    float fullRadius = Clampf(heightDip() * 0.35f, 140.0f, 280.0f);
+    const float maxSpeed = 5000.0f;
+    auto axisSpeed = [&](float d) -> float {
+        float ad = std::abs(d);
+        if (ad <= deadZone) return 0.0f;
+        float t = std::min(1.0f, (ad - deadZone) / (fullRadius - deadZone));
+        float v = maxSpeed * std::pow(t, 1.6f);
+        return d < 0 ? -v : v;
+    };
+    float targetX = axisSpeed(dx);
+    float targetY = axisSpeed(dy);
+    float blend = 1.0f - std::exp(-dt * 28.0f);
+    panVelocityX_ += (targetX - panVelocityX_) * blend;
+    panVelocityY_ += (targetY - panVelocityY_) * blend;
+    if (std::abs(panVelocityX_) < 0.4f) panVelocityX_ = 0;
+    if (std::abs(panVelocityY_) < 0.4f) panVelocityY_ = 0;
+    scrollX_ = std::max(0.0f, scrollX_ + panVelocityX_ * dt);
+    scrollY_ = std::max(0.0f, scrollY_ + panVelocityY_ * dt);
+    UpdateScrollPosition();
 }
 
 void DocView::EndMiddlePan() {
@@ -3304,8 +3337,7 @@ void DocView::OnMouseWheel(int delta, bool ctrl, bool shift, float x, float y) {
     if (delta > 0) step = -step;
     if (shift) scrollX_ = std::max(0.0f, scrollX_ + step);
     else scrollY_ = std::max(0.0f, scrollY_ + step);
-    UpdateScrollBars();
-    InvalidateAll();
+    UpdateScrollPosition();
 }
 
 void DocView::OnKeyDown(WPARAM key) {
@@ -3504,8 +3536,7 @@ LRESULT DocView::Handle(UINT msg, WPARAM wp, LPARAM lp) {
         case SB_BOTTOM: pos = si.nMax; break;
         }
         scrollY_ = (float)std::max(si.nMin, pos);
-        UpdateScrollBars();
-        InvalidateAll();
+        UpdateScrollPosition();
         return 0;
     }
     case WM_HSCROLL: {
@@ -3526,8 +3557,7 @@ LRESULT DocView::Handle(UINT msg, WPARAM wp, LPARAM lp) {
         case SB_THUMBTRACK: pos = si.nTrackPos; break;
         }
         scrollX_ = (float)std::max(0, pos);
-        UpdateScrollBars();
-        InvalidateAll();
+        UpdateScrollPosition();
         return 0;
     }
     case WM_MBUTTONDOWN:
@@ -3547,35 +3577,7 @@ LRESULT DocView::Handle(UINT msg, WPARAM wp, LPARAM lp) {
     case WM_TIMER:
         if (wp == 1 && middlePan_) {
             copyHover_.active = false;
-            ULONGLONG now = GetTickCount64();
-            float dt = (now - panLastTick_) / 1000.0f;
-            panLastTick_ = now;
-            dt = Clampf(dt, 0.008f, 0.05f);
-            float dx = (float)(panCurrent_.x - panAnchor_.x);
-            float dy = (float)(panCurrent_.y - panAnchor_.y);
-            const float deadZone = 15.0f;
-            // Match the feel of browser/PDF-reader autoscroll: a small dead
-            // zone, then a distance curve scaled to the viewport so reaching
-            // the edge gives a usefully fast read through long documents.
-            float fullRadius = Clampf(heightDip() * 0.35f, 140.0f, 280.0f);
-            const float maxSpeed = 5000.0f;
-            auto axisSpeed = [&](float d) -> float {
-                float ad = std::abs(d);
-                if (ad <= deadZone) return 0.0f;
-                float t = std::min(1.0f, (ad - deadZone) / (fullRadius - deadZone));
-                float v = maxSpeed * std::pow(t, 1.6f);
-                return d < 0 ? -v : v;
-            };
-            float targetX = axisSpeed(dx);
-            float targetY = axisSpeed(dy);
-            float blend = 1.0f - std::exp(-dt * 28.0f);
-            panVelocityX_ += (targetX - panVelocityX_) * blend;
-            panVelocityY_ += (targetY - panVelocityY_) * blend;
-            if (std::abs(panVelocityX_) < 0.4f) panVelocityX_ = 0;
-            if (std::abs(panVelocityY_) < 0.4f) panVelocityY_ = 0;
-            scrollX_ = std::max(0.0f, scrollX_ + panVelocityX_ * dt);
-            scrollY_ = std::max(0.0f, scrollY_ + panVelocityY_ * dt);
-            UpdateScrollPosition();
+            AdvanceMiddlePan();
         } else if (wp == 2) {
             copyDone_ = false;
             copyPressed_ = false;
@@ -3613,8 +3615,7 @@ LRESULT DocView::Handle(UINT msg, WPARAM wp, LPARAM lp) {
         float step = ((float)delta / (float)WHEEL_DELTA) *
                      (float)wheelStep_ * kWheelLine * (float)zoom_;
         scrollX_ = std::max(0.0f, scrollX_ + step);
-        UpdateScrollBars();
-        InvalidateAll();
+        UpdateScrollPosition();
         return 0;
     }
     case WM_LBUTTONDOWN:
