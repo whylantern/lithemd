@@ -202,6 +202,12 @@ void DocView::ClearAnnotations() {
     textHighlights_.clear();
     textHighlightPending_.clear();
     textHighlighting_ = false;
+    inkCurrent_.points.clear();
+    inkCurrentShape_ = InkShape{};
+    inkDrawing_ = false;
+    inkFreehandActive_ = false;
+    inkShapeDrawing_ = false;
+    inkErasePushed_ = false;
     inkSelection_.clear();
     inkLassoing_ = false;
     inkLasso_.clear();
@@ -228,7 +234,7 @@ bool DocView::SaveNotes(std::wstring* error) {
         return false;
     }
     if (inkEdit_) InkCommitText();
-    if (inkDrawing_ || inkFreehandActive_ || inkShapeDrawing_) InkEnd();
+    if (inkDrawing_ || inkFreehandActive_ || inkShapeDrawing_ || textHighlighting_) InkEnd();
 
     JNode root = NoteObject();
     root.members.emplace_back(L"version", NoteInt(1));
@@ -2226,7 +2232,8 @@ void DocView::SetInkMode(bool on) {
     if (inkMode_ == on) return;
     if (!on) {
         if (inkEdit_) InkCommitText();
-        if (inkDrawing_ || inkFreehandActive_ || inkErasing_ || inkShapeDrawing_) InkEnd();
+        if (inkDrawing_ || inkFreehandActive_ || inkErasing_ || inkShapeDrawing_ ||
+            textHighlighting_) InkEnd();
         inkDragMode_ = 0;
         inkLassoing_ = false;
         inkLasso_.clear();

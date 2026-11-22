@@ -449,6 +449,8 @@ void DocView::SetDocument(std::unique_ptr<Document> doc, bool preserveScroll, bo
 }
 
 void DocView::SetError(const std::wstring& message, const std::wstring& path, const std::wstring& sourceText) {
+    if (middlePan_) EndMiddlePan();
+    scrollMetricsValid_ = false;
     doc_.reset();
     if (canvas_) canvas_->ClearImageCache();
     pdf_.reset();
@@ -506,6 +508,9 @@ void DocView::SetSource(bool source) {
     if (inkEdit_) InkCommitText();
     if (inkDrawing_ || inkFreehandActive_ || inkErasing_ || inkShapeDrawing_ ||
         textHighlighting_) InkEnd();
+    // Plain text and source-code documents only have a source view. Without
+    // this guard Ctrl+1 would switch to an empty rendered view.
+    if (!source && doc_->kind == DocKind::Text) return;
     inkHover_ = 0;
     inkButtons_.clear();
     inkSelection_.clear();
