@@ -3603,6 +3603,20 @@ LRESULT DocView::Handle(UINT msg, WPARAM wp, LPARAM lp) {
         OnMouseWheel(delta, ctrl, shift, pt.x / scale, pt.y / scale);
         return 0;
     }
+    case WM_MOUSEHWHEEL: {
+        // Precision touchpads and horizontal mouse wheels send this instead
+        // of WM_MOUSEWHEEL + Shift. Without it, wide PDF pages and images
+        // appear to ignore horizontal swipes.
+        if (inkEdit_) InkCommitText();
+        if (middlePan_) EndMiddlePan();
+        int delta = GET_WHEEL_DELTA_WPARAM(wp);
+        float step = ((float)delta / (float)WHEEL_DELTA) *
+                     (float)wheelStep_ * kWheelLine * (float)zoom_;
+        scrollX_ = std::max(0.0f, scrollX_ + step);
+        UpdateScrollBars();
+        InvalidateAll();
+        return 0;
+    }
     case WM_LBUTTONDOWN:
         OnMouseDown(GET_X_LPARAM(lp), GET_Y_LPARAM(lp), (wp & MK_CONTROL) != 0);
         return 0;
