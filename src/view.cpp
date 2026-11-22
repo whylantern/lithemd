@@ -11,6 +11,7 @@
 #include <shellapi.h>
 #include <commctrl.h>
 #include <windowsx.h>
+#include <mmsystem.h>
 
 namespace {
 
@@ -135,6 +136,7 @@ struct DocView::Layout {
 
 // ================================================================ DocView
 DocView::~DocView() {
+    if (panTimerResolution_) { timeEndPeriod(1); panTimerResolution_ = false; }
     if (inkEdit_) DestroyWindow(inkEdit_);
     if (inkEditFont_) DeleteObject(inkEditFont_);
     if (inkEditBrush_) DeleteObject(inkEditBrush_);
@@ -277,6 +279,8 @@ void DocView::SetBackground(const std::wstring& path, int opacity, int fit, int 
 }
 
 void DocView::ClearDocument() {
+    if (middlePan_) EndMiddlePan();
+    scrollMetricsValid_ = false;
     doc_.reset();
     if (canvas_) canvas_->ClearImageCache();
     copyHover_ = CopyTarget{};
@@ -327,6 +331,8 @@ void DocView::ClearDocument() {
 }
 
 void DocView::SetDocument(std::unique_ptr<Document> doc, bool preserveScroll, bool preserveInk) {
+    if (middlePan_) EndMiddlePan();
+    scrollMetricsValid_ = false;
     float oldFrac = -1;
     if (preserveScroll && layout_ && layout_->height > 1) {
         float viewH = heightDip();
@@ -1166,6 +1172,9 @@ void DocView::UpdateScrollBars() {
     float maxY = std::max(0.0f, totalH - viewH);
     float maxX = std::max(0.0f, totalW - viewW);
     lastContentHeight_ = totalH;
+    scrollMaxX_ = maxX;
+    scrollMaxY_ = maxY;
+    scrollMetricsValid_ = true;
     if (pendingScrollFrac_ >= 0) {
         scrollY_ = pendingScrollFrac_ * maxY;
         pendingScrollFrac_ = -1;
@@ -1195,6 +1204,7 @@ void DocView::UpdateScrollBars() {
         ShowScrollBar(hwnd_, SB_HORZ, showH);
     }
     if (events_.statusChanged) events_.statusChanged();
+    lastScrollStatusTick_ = GetTickCount64();
     // The home page itself never scrolls; the recent-file list has its own
     // embedded scroll region.
     if (m == Mode::Welcome) {
@@ -1203,6 +1213,32 @@ void DocView::UpdateScrollBars() {
         vertScrollShown_ = horzScrollShown_ = false;
     }
     updatingScrollbars_ = false;
+}
+
+void DocView::UpdateScrollPosition() {
+    if (!hwnd_) return;
+    if (!scrollMetricsValid_) {
+        UpdateScrollBars();
+        InvalidateAll();
+        return;
+    }
+    scrollY_ = Clampf(scrollY_, 0, scrollMaxY_);
+    scrollX_ = Clampf(scrollX_, 0, scrollMaxX_);
+    SCROLLINFO si{};
+    si.cbSize = sizeof(si);
+    si.fMask = SIF_POS;
+    si.nPos = (int)std::lround(scrollY_);
+    SetScrollInfo(hwnd_, SB_VERT, &si, TRUE);
+    si.nPos = (int)std::lround(scrollX_);
+    SetScrollInfo(hwnd_, SB_HORZ, &si, TRUE);
+    // The outline/status only need a readable refresh rate; doing this on
+    // every animation tick forces a second full chrome repaint.
+    ULONGLONG now = GetTickCount64();
+    if (events_.statusChanged && now - lastScrollStatusTick_ >= 120) {
+        lastScrollStatusTick_ = now;
+        events_.statusChanged();
+    }
+    InvalidateAll();
 }
 
 void DocView::InvalidateAll() {
@@ -2657,7 +2693,11 @@ void DocView::BeginMiddlePan(int px, int py) {
     SetCapture(hwnd_);
     if (panTimer_) KillTimer(hwnd_, 1);
     panTimer_ = 1;
-    SetTimer(hwnd_, 1, 16, nullptr);
+    if (!panTimerResolution_) {
+        timeBeginPeriod(1);
+        panTimerResolution_ = true;
+    }
+    SetTimer(hwnd_, 1, 10, nullptr);
     SetCursor(LoadCursorW(nullptr, IDC_SIZEALL));
     InvalidateAll();
 }
@@ -2668,7 +2708,8 @@ void DocView::UpdateMiddlePan(int px, int py) {
     panCurrent_.x = (LONG)std::lround(px / scale);
     panCurrent_.y = (LONG)std::lround(py / scale);
     SetCursor(LoadCursorW(nullptr, IDC_SIZEALL));
-    InvalidateAll();
+    // The animation timer repaints at a stable cadence. Invalidating from
+    // every mouse move adds duplicate frames and starves WM_TIMER.
 }
 
 void DocView::EndMiddlePan() {
@@ -2676,8 +2717,11 @@ void DocView::EndMiddlePan() {
     middlePan_ = false;
     panVelocityX_ = panVelocityY_ = 0;
     if (panTimer_) { KillTimer(hwnd_, 1); panTimer_ = 0; }
+    if (panTimerResolution_) { timeEndPeriod(1); panTimerResolution_ = false; }
     if (GetCapture() == hwnd_) ReleaseCapture();
     SetCursor(LoadCursorW(nullptr, IDC_ARROW));
+    lastScrollStatusTick_ = GetTickCount64();
+    if (events_.statusChanged) events_.statusChanged();
     InvalidateAll();
 }
 
@@ -3503,26 +3547,29 @@ LRESULT DocView::Handle(UINT msg, WPARAM wp, LPARAM lp) {
             dt = Clampf(dt, 0.008f, 0.05f);
             float dx = (float)(panCurrent_.x - panAnchor_.x);
             float dy = (float)(panCurrent_.y - panAnchor_.y);
-            float dist = std::sqrt(dx * dx + dy * dy);
-            float targetX = 0, targetY = 0;
-            const float deadZone = 10.0f;
-            const float maxRadius = 180.0f;
-            const float maxSpeed = 1850.0f;
-            if (dist > deadZone) {
-                float strength = std::min(1.0f, (dist - deadZone) / (maxRadius - deadZone));
-                float speed = maxSpeed * (0.10f + 0.90f * strength) * strength;
-                targetX = dx / dist * speed * 0.72f;
-                targetY = dy / dist * speed;
-            }
-            float blend = 1.0f - std::exp(-dt * 20.0f);
+            const float deadZone = 15.0f;
+            // Match the feel of browser/PDF-reader autoscroll: a small dead
+            // zone, then a distance curve scaled to the viewport so reaching
+            // the edge gives a usefully fast read through long documents.
+            float fullRadius = Clampf(heightDip() * 0.35f, 140.0f, 280.0f);
+            const float maxSpeed = 5000.0f;
+            auto axisSpeed = [&](float d) -> float {
+                float ad = std::abs(d);
+                if (ad <= deadZone) return 0.0f;
+                float t = std::min(1.0f, (ad - deadZone) / (fullRadius - deadZone));
+                float v = maxSpeed * std::pow(t, 1.6f);
+                return d < 0 ? -v : v;
+            };
+            float targetX = axisSpeed(dx);
+            float targetY = axisSpeed(dy);
+            float blend = 1.0f - std::exp(-dt * 28.0f);
             panVelocityX_ += (targetX - panVelocityX_) * blend;
             panVelocityY_ += (targetY - panVelocityY_) * blend;
             if (std::abs(panVelocityX_) < 0.4f) panVelocityX_ = 0;
             if (std::abs(panVelocityY_) < 0.4f) panVelocityY_ = 0;
             scrollX_ = std::max(0.0f, scrollX_ + panVelocityX_ * dt);
             scrollY_ = std::max(0.0f, scrollY_ + panVelocityY_ * dt);
-            UpdateScrollBars();
-            InvalidateAll();
+            UpdateScrollPosition();
         } else if (wp == 2) {
             copyDone_ = false;
             copyPressed_ = false;

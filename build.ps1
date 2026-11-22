@@ -126,7 +126,7 @@ $tmpExe = Join-Path $build 'lithemd.exe'
 $libs = @(
     '-ld2d1', '-ldwrite', '-lwindowscodecs', '-lole32', '-loleaut32', '-luuid',
     '-lshell32', '-lshlwapi', '-lcomdlg32', '-lgdi32', '-luser32', '-ldwmapi',
-    '-ladvapi32', '-lcomctl32', '-luxtheme', '-lbcrypt'
+    '-ladvapi32', '-lcomctl32', '-luxtheme', '-lbcrypt', '-lwinmm'
 )
 Write-Host 'linking...'
 Remove-Item -LiteralPath $tmpExe -Force -ErrorAction SilentlyContinue

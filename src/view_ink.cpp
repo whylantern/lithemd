@@ -200,6 +200,8 @@ void DocView::ClearAnnotations() {
     inkLayers_.clear();
     pdfHighlights_.clear();
     textHighlights_.clear();
+    textHighlightPending_.clear();
+    textHighlighting_ = false;
     inkSelection_.clear();
     inkLassoing_ = false;
     inkLasso_.clear();

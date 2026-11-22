@@ -151,12 +151,17 @@ private:
     float scrollY_ = 0;
     std::vector<std::wstring> recent_;
     bool middlePan_ = false;
+    bool panTimerResolution_ = false;
     POINT panAnchor_{};
     POINT panCurrent_{};
     float panVelocityX_ = 0;
     float panVelocityY_ = 0;
     ULONGLONG panLastTick_ = 0;
     UINT_PTR panTimer_ = 0;
+    float scrollMaxX_ = 0;
+    float scrollMaxY_ = 0;
+    bool scrollMetricsValid_ = false;
+    ULONGLONG lastScrollStatusTick_ = 0;
 
     struct Layout;
     std::shared_ptr<Layout> layout_;
@@ -388,6 +393,7 @@ private:
     void BuildJson();
     void RelayoutIfNeeded();
     void UpdateScrollBars();
+    void UpdateScrollPosition();
     void Paint();
     void PaintWelcome(class Canvas& c);
     void PaintError(class Canvas& c);
