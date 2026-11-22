@@ -33,6 +33,7 @@ private:
     void UpdateHsvFromRgb();
     void SelectPreset(int index);
     void NewPreset();
+    void DeletePreset();
     void ResetPresets();
     void ReplacePreset(int index);
     void ToggleToolbarPreset(int index);
@@ -46,7 +47,6 @@ private:
     HWND owner_ = nullptr;
     Settings* settings_ = nullptr;
     int presetIndex_ = 0;
-    bool creatingNew_ = false;
     int hue_ = 0;          // 0-359
     float sat_ = 1.0f;     // 0-1
     float val_ = 1.0f;     // 0-1
@@ -56,6 +56,7 @@ private:
     ChangedFn onChanged_;
     AppliedFn onApplied_;
     HWND edits_[5]{};      // R,G,B,A,hex
+    HBRUSH editBrush_ = nullptr;
     std::unique_ptr<class Canvas> canvas_;
 
     DRect previewRect_;
@@ -66,6 +67,7 @@ private:
     DRect pinRects_[12];
     DRect newRect_;
     DRect resetRect_;
+    DRect deleteRect_;
     DRect applyRect_;
     DRect cancelRect_;
 };

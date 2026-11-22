@@ -3,9 +3,11 @@
 #include <dwrite.h>
 #include <wrl/client.h>
 #include <algorithm>
+#include <cmath>
 #include <cwctype>
 #include <map>
 #include <set>
+#include <vector>
 
 using Microsoft::WRL::ComPtr;
 
@@ -751,17 +753,21 @@ MathBox MeasureMath(const MathNode& n, IDWriteFactory* dwrite, float fs) {
         float height = 0;
         for (float h : rowH) height += h + rowGap;
         if (!rowH.empty()) height -= rowGap;
-        float del = (n.openDelim || n.closeDelim) ? std::max(fs * 0.5f, height * 0.28f) : 0;
-        box.width = width + del * 2;
+        bool anyDelim = n.openDelim || n.closeDelim;
+        float del = anyDelim ? std::max(fs * 0.55f, height * 0.30f) : 0;
+        float delimPad = anyDelim ? std::max(fs * 0.10f, height * 0.06f) : 0;
+        box.width = width + del * 2 + delimPad * 2;
         box.ascent = height * 0.62f;
         box.descent = height * 0.38f;
         break;
     }
     case MathKind::Delim: {
         MathBox a = n.a ? MeasureMath(*n.a, dwrite, fs) : MathBox{};
-        float del = (n.openDelim || n.closeDelim) ? std::max(fs * 0.35f, a.height() * 0.28f) : 0;
+        bool anyDelim = n.openDelim || n.closeDelim;
+        float del = anyDelim ? std::max(fs * 0.40f, a.height() * 0.30f) : 0;
+        float delimPad = anyDelim ? std::max(fs * 0.08f, a.height() * 0.06f) : 0;
         float closePad = n.closeDelim ? fs * 0.10f : 0.0f;
-        box.width = a.width + del * 2 + closePad;
+        box.width = a.width + del * 2 + closePad + delimPad * 2;
         box.ascent = std::max(a.ascent, a.height() * 0.62f);
         box.descent = std::max(a.descent, a.height() * 0.38f);
         break;
@@ -782,11 +788,105 @@ MathBox MeasureMath(const MathNode& n, IDWriteFactory* dwrite, float fs) {
 
 namespace {
 
+// Filled quarter-arc with a calligraphic width taper. The arc is a ribbon
+// around a circular centerline; w0/w1 are the stroke widths at the two ends.
+void FillTaperedArc(ID2D1RenderTarget* target, ID2D1SolidColorBrush* brush,
+                    float cx, float cy, float r, float a0, float a1,
+                    float w0, float w1) {
+    if (!target || !brush || r < 0.5f) return;
+    const int segments = 16;
+    std::vector<D2D1_POINT_2F> outer;
+    std::vector<D2D1_POINT_2F> inner;
+    outer.reserve((size_t)segments + 1);
+    inner.reserve((size_t)segments + 1);
+    const float kPi = 3.14159265358979323846f;
+    float limit = r * 0.46f;
+    for (int i = 0; i <= segments; i++) {
+        float t = (float)i / (float)segments;
+        float angle = (a0 + (a1 - a0) * t) * kPi / 180.0f;
+        float px = cx + r * std::cos(angle);
+        float py = cy + r * std::sin(angle);
+        float nx = std::cos(angle);
+        float ny = std::sin(angle);
+        float half = (w0 + (w1 - w0) * t) * 0.5f;
+        if (half > limit) half = limit;
+        if (half < 0.2f) half = 0.2f;
+        outer.push_back(D2D1::Point2F(px + nx * half, py + ny * half));
+        inner.push_back(D2D1::Point2F(px - nx * half, py - ny * half));
+    }
+
+    ID2D1Factory* factory = nullptr;
+    target->GetFactory(&factory);
+    if (!factory) return;
+    ComPtr<ID2D1PathGeometry> path;
+    if (FAILED(factory->CreatePathGeometry(&path)) || !path) {
+        factory->Release();
+        return;
+    }
+    ComPtr<ID2D1GeometrySink> sink;
+    if (FAILED(path->Open(&sink)) || !sink) {
+        factory->Release();
+        return;
+    }
+    sink->BeginFigure(outer.front(), D2D1_FIGURE_BEGIN_FILLED);
+    for (size_t i = 1; i < outer.size(); i++) sink->AddLine(outer[i]);
+    for (size_t i = inner.size(); i-- > 0;) sink->AddLine(inner[i]);
+    sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+    sink->Close();
+    target->FillGeometry(path.Get(), brush);
+    factory->Release();
+}
+
+// Calligraphic brace made of four quarter arcs and two thick vertical stems.
+// `{`: top tip -> upper arc -> stem -> lower arc -> cusp, then mirrored below.
+// `}` is the horizontal mirror.
+void DrawBrace(ID2D1RenderTarget* target, ID2D1SolidColorBrush* brush, wchar_t ch,
+               float x, float top, float bottom, float fs) {
+    float height = bottom - top;
+    if (height < 2.0f) return;
+    float braceW = std::max(fs * 0.34f, height * 0.20f);
+    braceW = std::min(braceW, height * 0.42f);
+    if (braceW < 2.0f) return;
+    float r = braceW * 0.5f;
+    float thick = std::max(fs * 0.10f, std::min(height * 0.018f, fs * 0.18f));
+    thick = std::max(thick, 1.2f);
+    float thin = std::max(0.8f, thick * 0.30f);
+    float mid = top + height * 0.5f;
+    float stemTop = top + r;
+    float stemBot = bottom - r;
+    if (stemBot <= stemTop + 0.5f) return;
+    float stemX = (ch == L'{') ? x + r : x - r;
+    float overlap = thick * 0.35f;
+
+    target->FillRectangle(D2D1_RECT_F{ stemX - thick * 0.5f, stemTop - overlap,
+                                       stemX + thick * 0.5f, mid - r + overlap }, brush);
+    target->FillRectangle(D2D1_RECT_F{ stemX - thick * 0.5f, mid + r - overlap,
+                                       stemX + thick * 0.5f, stemBot + overlap }, brush);
+
+    if (ch == L'{') {
+        // Top and bottom terminals are quarter arcs centered on the tip, so
+        // the tip leaves horizontally and meets each vertical stem smoothly.
+        FillTaperedArc(target, brush, x + braceW, top + r, r, 270.0f, 180.0f, thin, thick);
+        FillTaperedArc(target, brush, x, mid - r, r, 0.0f, 90.0f, thick, thin);
+        FillTaperedArc(target, brush, x, mid + r, r, 270.0f, 360.0f, thin, thick);
+        FillTaperedArc(target, brush, x + braceW, bottom - r, r, 180.0f, 90.0f, thick, thin);
+    } else {
+        FillTaperedArc(target, brush, x - braceW, top + r, r, 270.0f, 360.0f, thin, thick);
+        FillTaperedArc(target, brush, x, mid - r, r, 90.0f, 180.0f, thin, thick);
+        FillTaperedArc(target, brush, x, mid + r, r, 180.0f, 270.0f, thick, thin);
+        FillTaperedArc(target, brush, x - braceW, bottom - r, r, 0.0f, 90.0f, thick, thin);
+    }
+}
+
 void DrawDelimiter(ID2D1RenderTarget* target, ID2D1SolidColorBrush* brush, wchar_t ch,
                    float x, float top, float height, float fs) {
     if (!ch) return;
     float w = std::max(fs * 0.30f, height * 0.24f);
     float bottom = top + height;
+    if (ch == L'{' || ch == L'}') {
+        DrawBrace(target, brush, ch, x, top, bottom, fs);
+        return;
+    }
     ComPtr<ID2D1PathGeometry> path;
     ComPtr<ID2D1GeometrySink> sink;
     ID2D1Factory* factory = nullptr;
@@ -797,9 +897,6 @@ void DrawDelimiter(ID2D1RenderTarget* target, ID2D1SolidColorBrush* brush, wchar
     auto begin = [&](float px, float py) {
         sink->BeginFigure(D2D1::Point2F(px, py), D2D1_FIGURE_BEGIN_HOLLOW);
     };
-    // Keep the original upper-lobe style (and width); only its direction was
-    // wrong. The lower half is the same curve mirrored vertically.
-    float braceW = w;
     // The caller anchors each glyph at its outer edge. Parenthesis tips sit
     // on that anchor and the curve bows toward the enclosed content, so the
     // left glyph opens right and the right glyph opens left.
@@ -825,31 +922,6 @@ void DrawDelimiter(ID2D1RenderTarget* target, ID2D1SolidColorBrush* brush, wchar
         sink->AddLine(D2D1::Point2F(x, top));
         sink->AddLine(D2D1::Point2F(x, bottom));
         sink->AddLine(D2D1::Point2F(x - w * 0.75f, bottom));
-    } else if (ch == L'{') {
-        // Take the original (correct-looking) upper lobe, flip it horizontally
-        // so its tip opens toward the content, and mirror that curve below.
-        // The tip overhang is slightly wider so the top/bottom curls flare out.
-        float tip = x + braceW * 1.08f;
-        begin(tip, top);
-        sink->AddBezier(D2D1::BezierSegment(
-            D2D1::Point2F(x - braceW * 0.02f, top),
-            D2D1::Point2F(x + braceW * 0.85f, top + height * 0.25f),
-            D2D1::Point2F(x + braceW * 0.25f, top + height * 0.5f)));
-        sink->AddBezier(D2D1::BezierSegment(
-            D2D1::Point2F(x + braceW * 0.85f, bottom - height * 0.25f),
-            D2D1::Point2F(x - braceW * 0.02f, bottom),
-            D2D1::Point2F(tip, bottom)));
-    } else if (ch == L'}') {
-        float tip = x - braceW * 1.08f;
-        begin(tip, top);
-        sink->AddBezier(D2D1::BezierSegment(
-            D2D1::Point2F(x + braceW * 0.02f, top),
-            D2D1::Point2F(x - braceW * 0.85f, top + height * 0.25f),
-            D2D1::Point2F(x - braceW * 0.25f, top + height * 0.5f)));
-        sink->AddBezier(D2D1::BezierSegment(
-            D2D1::Point2F(x - braceW * 0.85f, bottom - height * 0.25f),
-            D2D1::Point2F(x + braceW * 0.02f, bottom),
-            D2D1::Point2F(tip, bottom)));
     } else if (ch == L'⌊') {
         begin(x, top);
         sink->AddLine(D2D1::Point2F(x, bottom));
@@ -996,8 +1068,10 @@ void DrawNode(const MathNode& n, ID2D1RenderTarget* target, IDWriteFactory* dwri
         if (!colW.empty()) width -= gap;
         for (float h : rowH) height += h + rowGap;
         if (!rowH.empty()) height -= rowGap;
-        float del = (n.openDelim || n.closeDelim) ? std::max(fs * 0.5f, height * 0.28f) : 0;
-        float left = x + del;
+        bool anyDelim = n.openDelim || n.closeDelim;
+        float del = anyDelim ? std::max(fs * 0.55f, height * 0.30f) : 0;
+        float delimPad = anyDelim ? std::max(fs * 0.10f, height * 0.06f) : 0;
+        float left = x + del + delimPad;
         float top = baseline - height * 0.62f;
         float cy = top;
         for (size_t r = 0; r < n.cells.size(); r++) {
@@ -1011,20 +1085,27 @@ void DrawNode(const MathNode& n, ID2D1RenderTarget* target, IDWriteFactory* dwri
             }
             cy += rowH[r] + rowGap;
         }
-        if (n.openDelim) DrawDelimiter(target, brush, n.openDelim, x + del * 0.45f, top, height, fs);
-        if (n.closeDelim) DrawDelimiter(target, brush, n.closeDelim, x + width + del * 1.55f, top, height, fs);
+        if (n.openDelim) DrawDelimiter(target, brush, n.openDelim, x + del * 0.28f, top, height, fs);
+        if (n.closeDelim)
+            DrawDelimiter(target, brush, n.closeDelim,
+                          x + del + delimPad + width + del * 0.60f + delimPad,
+                          top, height, fs);
         break;
     }
     case MathKind::Delim: {
         MathBox a = n.a ? MeasureMath(*n.a, dwrite, fs) : MathBox{};
-        float del = (n.openDelim || n.closeDelim) ? std::max(fs * 0.35f, a.height() * 0.28f) : 0;
+        bool anyDelim = n.openDelim || n.closeDelim;
+        float del = anyDelim ? std::max(fs * 0.40f, a.height() * 0.30f) : 0;
+        float delimPad = anyDelim ? std::max(fs * 0.08f, a.height() * 0.06f) : 0;
         float closePad = n.closeDelim ? fs * 0.10f : 0.0f;
         float top = baseline - std::max(a.ascent, a.height() * 0.62f);
         float height = std::max(a.height(), fs);
-        if (n.openDelim) DrawDelimiter(target, brush, n.openDelim, x + del * 0.45f, top, height, fs);
-        if (n.a) DrawNode(*n.a, target, dwrite, brush, x + del, baseline, fs);
+        if (n.openDelim) DrawDelimiter(target, brush, n.openDelim, x + del * 0.28f, top, height, fs);
+        if (n.a) DrawNode(*n.a, target, dwrite, brush, x + del + delimPad, baseline, fs);
         if (n.closeDelim)
-            DrawDelimiter(target, brush, n.closeDelim, x + del + a.width + closePad + del * 0.55f, top, height, fs);
+            DrawDelimiter(target, brush, n.closeDelim,
+                          x + del + delimPad + a.width + closePad + del * 0.60f + delimPad,
+                          top, height, fs);
         break;
     }
     case MathKind::Accent: {

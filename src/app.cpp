@@ -1043,30 +1043,37 @@ private:
 
 void SettingsWindow::Paint() {
     if (!canvas_) canvas_ = std::make_unique<Canvas>();
-    Canvas& c = *canvas_;
-    if (!c.Begin(hwnd_, Palette::Get(settings_->theme))) return;
-    c.SetTranslateUi(true);
-    auto& p = c.palette();
-    float w = c.widthDip(), h = c.heightDip();
-    c.FillRect(0, 0, w, h, p.bg);
     const float aboutY = 1978.0f;
     float footerY = aboutY + 48.0f;
     if (aboutExpanded_) footerY += 400.0f + 12.0f + 100.0f + 12.0f;
     contentHeight_ = footerY + 36.0f;
-    float maxScroll = std::max(0.0f, contentHeight_ - h);
-    scrollY_ = Clampf(scrollY_, 0.0f, maxScroll);
     UINT dpi = GetDpiForWindow(hwnd_);
     if (!dpi) dpi = 96;
     float sc = dpi / 96.0f;
+    RECT client{};
+    GetClientRect(hwnd_, &client);
+    float clientH = (client.bottom - client.top) / sc;
+    float maxScroll = std::max(0.0f, contentHeight_ - clientH);
+    scrollY_ = Clampf(scrollY_, 0.0f, maxScroll);
     SCROLLINFO si{};
     si.cbSize = sizeof(si);
     si.fMask = SIF_RANGE | SIF_PAGE | SIF_POS;
     si.nMin = 0;
     si.nMax = (int)std::lround(contentHeight_ * sc);
-    si.nPage = (int)std::lround(h * sc);
+    si.nPage = (int)std::lround(clientH * sc);
     si.nPos = (int)std::lround(scrollY_ * sc);
+    // Scrollbar visibility changes client geometry. Finish that before the
+    // render target begins drawing; doing it mid-frame can invalidate the
+    // target between BeginDraw and EndDraw.
     SetScrollInfo(hwnd_, SB_VERT, &si, TRUE);
     ShowScrollBar(hwnd_, SB_VERT, maxScroll > 0.5f);
+
+    Canvas& c = *canvas_;
+    if (!c.Begin(hwnd_, Palette::Get(settings_->theme))) return;
+    c.SetTranslateUi(true);
+    auto& p = c.palette();
+    float w = c.widthDip();
+    float h = c.heightDip();
     c.SetTransform(0, -scrollY_);
     rects_.clear();
     checks_.clear();
@@ -3177,6 +3184,7 @@ private:
                 presetIndex = settings_.inkToolbarPresets[(size_t)position];
         }
         if (settings_.inkPresets.empty()) settings_.inkPresets = DefaultInkPresets();
+        settings_.NormalizeInkPresets();
         if (presetIndex < 0 || presetIndex >= (int)settings_.inkPresets.size()) presetIndex = 0;
         Color initial = settings_.inkPresets[(size_t)presetIndex];
         auto* win = new ColorPickerWindow(hwnd_, &settings_, presetIndex, initial,
@@ -3186,13 +3194,6 @@ private:
             },
             [this](int index) {
                 if (index < 0 || index >= (int)settings_.inkPresets.size()) return;
-                auto& slots = settings_.inkToolbarPresets;
-                auto it = std::find(slots.begin(), slots.end(), index);
-                if (it == slots.end()) {
-                    if (slots.size() < 5) slots.push_back(index);
-                    else slots.back() = index;
-                    settings_.Save();
-                }
                 ForEachView([this, index](DocView* v) {
                     v->SetSettings(&settings_);
                     auto pos = std::find(settings_.inkToolbarPresets.begin(),

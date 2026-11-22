@@ -1664,34 +1664,39 @@ void Settings::Clamp() {
     }
     if (inkPresets.empty()) inkPresets = DefaultInkPresets();
     if (inkPresets.size() > 12) inkPresets.resize(12);
+    NormalizeInkPresets();
+    if ((int)documentLanguage < (int)DocLanguage::Auto ||
+        (int)documentLanguage > (int)DocLanguage::Western) documentLanguage = DocLanguage::Auto;
+    while (recent.size() > MaxRecent) recent.pop_back();
+    while (recentBlocked.size() > MaxRecent) recentBlocked.erase(recentBlocked.begin());
+    while (workspaceHistory.size() > MaxWorkspaceHistory) workspaceHistory.pop_back();
+}
+
+void Settings::NormalizeInkPresets() {
+    if (inkPresets.empty()) inkPresets = DefaultInkPresets();
+    if (inkPresets.size() > 12) inkPresets.resize(12);
     for (auto& c : inkPresets) {
         c.r = std::clamp(c.r, 0.0f, 1.0f);
         c.g = std::clamp(c.g, 0.0f, 1.0f);
         c.b = std::clamp(c.b, 0.0f, 1.0f);
         c.a = std::clamp(c.a, 0.0f, 1.0f);
     }
-    if (inkToolbarPresets.empty()) inkToolbarPresets.assign({ 0, 1, 2, 3, 4 });
-    if (inkToolbarPresets.size() > 5) inkToolbarPresets.resize(5);
-    std::vector<int> used;
-    for (auto& index : inkToolbarPresets) {
-        if (index < 0 || index >= (int)inkPresets.size() ||
-            std::find(used.begin(), used.end(), index) != used.end()) {
-            index = -1;
-            for (int candidate = 0; candidate < (int)inkPresets.size(); candidate++) {
-                if (std::find(used.begin(), used.end(), candidate) == used.end()) {
-                    index = candidate;
-                    break;
-                }
-            }
-        }
-        if (index < 0) index = 0;
-        used.push_back(index);
+    std::vector<int> slots;
+    slots.reserve(5);
+    auto addUnique = [&](int index) {
+        if (index < 0 || index >= (int)inkPresets.size() || slots.size() >= 5) return;
+        if (std::find(slots.begin(), slots.end(), index) == slots.end())
+            slots.push_back(index);
+    };
+    for (int index : inkToolbarPresets) addUnique(index);
+    if (slots.empty()) {
+        for (int i = 0; i < (int)inkPresets.size() && slots.size() < 5; i++) addUnique(i);
+        // A fresh profile starts with five toolbar colors. Once the user
+        // explicitly unpins colors, a shorter selection is preserved.
+        for (int i = 0; slots.size() < 5; i = (i + 1) % (int)inkPresets.size())
+            slots.push_back(i);
     }
-    if ((int)documentLanguage < (int)DocLanguage::Auto ||
-        (int)documentLanguage > (int)DocLanguage::Western) documentLanguage = DocLanguage::Auto;
-    while (recent.size() > MaxRecent) recent.pop_back();
-    while (recentBlocked.size() > MaxRecent) recentBlocked.erase(recentBlocked.begin());
-    while (workspaceHistory.size() > MaxWorkspaceHistory) workspaceHistory.pop_back();
+    inkToolbarPresets = std::move(slots);
 }
 
 Settings Settings::Load() {

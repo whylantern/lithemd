@@ -12,7 +12,7 @@
 #include <vector>
 #include <cstdint>
 
-inline constexpr wchar_t kAppVersion[] = L"2.4.3.2";
+inline constexpr wchar_t kAppVersion[] = L"2.5.0.0";
 
 // ------------------------------------------------------------------ strings
 std::wstring WideFromUtf8(const std::string& s);
@@ -244,4 +244,6 @@ struct Settings {
     void AddWorkspace(const std::wstring& path);
     void ClearWorkspaces();
     void Clamp();
+    // Keep 1..12 saved colors and exactly five valid toolbar slots.
+    void NormalizeInkPresets();
 };

@@ -4,11 +4,16 @@
 #include <algorithm>
 #include <cmath>
 #include <windowsx.h>
+#include <dwmapi.h>
 
 namespace {
 
 int ToByte(float v) {
     return (int)std::lround(std::clamp(v, 0.0f, 1.0f) * 255.0f);
+}
+
+COLORREF ToRef(const Color& c) {
+    return RGB(ToByte(c.r), ToByte(c.g), ToByte(c.b));
 }
 
 bool ParseHexColor(const std::wstring& text, int& r, int& g, int& b, int& a) {
@@ -85,6 +90,7 @@ ColorPickerWindow::ColorPickerWindow(HWND owner, Settings* settings, int presetI
       onChanged_(std::move(onChanged)), onApplied_(std::move(onApplied)) {
     if (settings_ && settings_->inkPresets.empty())
         settings_->inkPresets = DefaultInkPresets();
+    if (settings_) settings_->NormalizeInkPresets();
     r_ = ToByte(initial.r);
     g_ = ToByte(initial.g);
     b_ = ToByte(initial.b);
@@ -94,7 +100,12 @@ ColorPickerWindow::ColorPickerWindow(HWND owner, Settings* settings, int presetI
         presetIndex_ = 0;
 }
 
-ColorPickerWindow::~ColorPickerWindow() = default;
+ColorPickerWindow::~ColorPickerWindow() {
+    if (editBrush_) {
+        DeleteObject(editBrush_);
+        editBrush_ = nullptr;
+    }
+}
 
 Color ColorPickerWindow::Current() const {
     return Color(r_ / 255.0f, g_ / 255.0f, b_ / 255.0f, a_ / 255.0f);
@@ -121,6 +132,11 @@ bool ColorPickerWindow::Create() {
         wc.lpfnWndProc = WndProc;
         wc.hInstance = GetModuleHandleW(nullptr);
         wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+        wc.hIcon = LoadIconW(wc.hInstance, MAKEINTRESOURCEW(1));
+        wc.hIconSm = (HICON)LoadImageW(wc.hInstance, MAKEINTRESOURCEW(1), IMAGE_ICON,
+                                       GetSystemMetrics(SM_CXSMICON),
+                                       GetSystemMetrics(SM_CYSMICON), 0);
+        if (!wc.hIconSm) wc.hIconSm = wc.hIcon;
         wc.lpszClassName = L"LitheMdColorPicker";
         RegisterClassExW(&wc);
         registered = true;
@@ -150,6 +166,13 @@ bool ColorPickerWindow::Create() {
     }
     ShowWindow(hwnd_, SW_SHOWNORMAL);
     SetForegroundWindow(hwnd_);
+    {
+        bool dark = settings_ && settings_->dark;
+        BOOL value = dark ? TRUE : FALSE;
+        DwmSetWindowAttribute(hwnd_, 20, &value, sizeof(value));
+        DwmSetWindowAttribute(hwnd_, 19, &value, sizeof(value));
+        ApplyDarkWindowTheme(hwnd_, dark);
+    }
     return true;
 }
 
@@ -238,7 +261,6 @@ int ColorPickerWindow::ToolbarCount() const {
 
 void ColorPickerWindow::SelectPreset(int index) {
     if (!settings_ || index < 0 || index >= (int)settings_->inkPresets.size()) return;
-    creatingNew_ = false;
     presetIndex_ = index;
     Color color = settings_->inkPresets[(size_t)index];
     r_ = ToByte(color.r); g_ = ToByte(color.g); b_ = ToByte(color.b); a_ = ToByte(color.a);
@@ -249,18 +271,46 @@ void ColorPickerWindow::SelectPreset(int index) {
 
 void ColorPickerWindow::NewPreset() {
     if (!settings_ || settings_->inkPresets.size() >= 12) return;
-    creatingNew_ = true;
-    presetIndex_ = -1;
+    // Add immediately so the new palette entry is visible even if the user
+    // then edits it or closes the window. Applying updates this entry.
+    settings_->inkPresets.push_back(Current());
+    settings_->NormalizeInkPresets();
+    presetIndex_ = (int)settings_->inkPresets.size() - 1;
+    settings_->Save();
+    if (onChanged_) onChanged_();
+    InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+void ColorPickerWindow::DeletePreset() {
+    if (!settings_ || settings_->inkPresets.size() <= 1) return;
+    int index = presetIndex_;
+    if (index < 0 || index >= (int)settings_->inkPresets.size()) return;
+    settings_->inkPresets.erase(settings_->inkPresets.begin() + index);
+    for (int& slot : settings_->inkToolbarPresets) {
+        if (slot == index) slot = -1;
+        else if (slot > index) slot--;
+    }
+    settings_->NormalizeInkPresets();
+    if (presetIndex_ >= (int)settings_->inkPresets.size())
+        presetIndex_ = (int)settings_->inkPresets.size() - 1;
+    if (presetIndex_ >= 0) {
+        Color color = settings_->inkPresets[(size_t)presetIndex_];
+        r_ = ToByte(color.r); g_ = ToByte(color.g); b_ = ToByte(color.b); a_ = ToByte(color.a);
+        UpdateHsvFromRgb();
+        SyncEdits();
+    }
+    settings_->Save();
+    if (onChanged_) onChanged_();
+    if (onApplied_) onApplied_(presetIndex_);
     InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
 void ColorPickerWindow::ResetPresets() {
     if (!settings_) return;
     settings_->inkPresets = DefaultInkPresets();
-    settings_->inkToolbarPresets = { 0, 1, 2, 3, 4 };
+    settings_->NormalizeInkPresets();
     settings_->Save();
     presetIndex_ = 0;
-    creatingNew_ = false;
     Color color = settings_->inkPresets[0];
     r_ = ToByte(color.r); g_ = ToByte(color.g); b_ = ToByte(color.b); a_ = ToByte(color.a);
     UpdateHsvFromRgb();
@@ -280,32 +330,36 @@ void ColorPickerWindow::ReplacePreset(int index) {
 
 void ColorPickerWindow::ToggleToolbarPreset(int index) {
     if (!settings_ || index < 0 || index >= (int)settings_->inkPresets.size()) return;
+    settings_->NormalizeInkPresets();
     auto& slots = settings_->inkToolbarPresets;
     auto it = std::find(slots.begin(), slots.end(), index);
     if (it != slots.end()) {
-        if (slots.size() > 1) slots.erase(it);
-    } else if (slots.size() < 5) {
-        slots.push_back(index);
-    } else {
+        // Unpin. The toolbar may temporarily hold fewer than five colors;
+        // pin another color to fill the freed slot.
+        slots.erase(it);
+        settings_->NormalizeInkPresets();
+        settings_->Save();
+        if (onChanged_) onChanged_();
+        InvalidateRect(hwnd_, nullptr, FALSE);
         return;
     }
+    if (slots.size() >= 5) slots.back() = index;
+    else slots.push_back(index);
+    settings_->NormalizeInkPresets();
     settings_->Save();
     if (onChanged_) onChanged_();
+    if (onApplied_) onApplied_(index);
     InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
 void ColorPickerWindow::Apply() {
     Color color = Current();
     if (settings_) {
-        if (creatingNew_ || presetIndex_ < 0 ||
-            presetIndex_ >= (int)settings_->inkPresets.size()) {
-            if (settings_->inkPresets.size() >= 12) return;
-            settings_->inkPresets.push_back(color);
-            presetIndex_ = (int)settings_->inkPresets.size() - 1;
-        } else {
-            settings_->inkPresets[(size_t)presetIndex_] = color;
-        }
-        creatingNew_ = false;
+        if (presetIndex_ < 0 || presetIndex_ >= (int)settings_->inkPresets.size())
+            presetIndex_ = 0;
+        if (settings_->inkPresets.empty()) settings_->inkPresets = DefaultInkPresets();
+        settings_->inkPresets[(size_t)presetIndex_] = color;
+        settings_->NormalizeInkPresets();
         settings_->Save();
     }
     if (onChanged_) onChanged_();
@@ -339,7 +393,7 @@ void ColorPickerWindow::Paint() {
         presetRects_[i] = r;
         pinRects_[i] = { r.x + r.w - 18, r.y + 4, 16, 16 };
         if (i >= count) continue;
-        bool selected = !creatingNew_ && presetIndex_ == i;
+        bool selected = presetIndex_ == i;
         c.FillRound(r.x, r.y, r.w, r.h, 7, selected ? p.accentSoft : p.surface);
         c.StrokeRound(r.x, r.y, r.w, r.h, 7, selected ? p.accent : p.border);
         Color color = presets[(size_t)i];
@@ -366,9 +420,20 @@ void ColorPickerWindow::Paint() {
     c.DrawText(L"恢复默认", resetRect_.x, resetRect_.y, resetRect_.w, resetRect_.h, 12,
                p.fg, false, false, DWRITE_TEXT_ALIGNMENT_CENTER,
                DWRITE_PARAGRAPH_ALIGNMENT_CENTER, false);
-    c.DrawText(L"主栏颜色 " + std::to_wstring(ToolbarCount()) + L"/5", 18, 376, 200, 18, 10.5f,
-               p.muted, false, false, DWRITE_TEXT_ALIGNMENT_LEADING,
-               DWRITE_PARAGRAPH_ALIGNMENT_NEAR, false);
+    deleteRect_ = { 18, 372, 120, 32 };
+    bool canDelete = settings_ && settings_->inkPresets.size() > 1 &&
+                     presetIndex_ >= 0 && presetIndex_ < (int)settings_->inkPresets.size();
+    c.FillRound(deleteRect_.x, deleteRect_.y, deleteRect_.w, deleteRect_.h, 7, p.surface);
+    c.StrokeRound(deleteRect_.x, deleteRect_.y, deleteRect_.w, deleteRect_.h, 7,
+                  canDelete ? p.border : p.muted);
+    c.DrawText(L"删除", deleteRect_.x, deleteRect_.y, deleteRect_.w, deleteRect_.h, 12,
+               canDelete ? p.fg : p.muted, false, false,
+               DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, false);
+    int presetCount = settings_ ? (int)settings_->inkPresets.size() : (int)DefaultInkPresets().size();
+    c.DrawText(L"备选 " + std::to_wstring(presetCount) + L"/12  ·  主栏 " +
+                   std::to_wstring(ToolbarCount()) + L"/5",
+               150, 378, 250, 18, 10.5f, p.muted, false, false,
+               DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_NEAR, false);
 
     // Saturation/value square.
     svRect_ = { 280, 74, 220, 180 };
@@ -453,10 +518,21 @@ LRESULT ColorPickerWindow::Handle(UINT msg, WPARAM wp, LPARAM lp) {
             if (i < 4) style |= ES_NUMBER;
             edits_[i] = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", style, 0, 0, 60, 24,
                                         hwnd_, (HMENU)(INT_PTR)(2001 + i), GetModuleHandleW(nullptr), nullptr);
-            if (edits_[i]) SendMessageW(edits_[i], WM_SETFONT, (WPARAM)GetStockObject(DEFAULT_GUI_FONT), TRUE);
+            if (edits_[i]) {
+                SendMessageW(edits_[i], WM_SETFONT, (WPARAM)GetStockObject(DEFAULT_GUI_FONT), TRUE);
+                ApplyDarkWindowTheme(edits_[i], settings_ && settings_->dark);
+            }
         }
         SyncEdits();
         return 0;
+    }
+    case WM_CTLCOLOREDIT: {
+        HDC dc = (HDC)wp;
+        auto& p = Palette::Get(settings_ ? settings_->theme : L"blue");
+        SetTextColor(dc, ToRef(p.fg));
+        SetBkColor(dc, ToRef(p.surface));
+        if (!editBrush_) editBrush_ = CreateSolidBrush(ToRef(p.surface));
+        return (LRESULT)editBrush_;
     }
     case WM_SIZE:
         LayoutEdits();
@@ -496,6 +572,7 @@ LRESULT ColorPickerWindow::Handle(UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         }
         if (newRect_.Contains(x, y)) { NewPreset(); return 0; }
+        if (deleteRect_.Contains(x, y)) { DeletePreset(); return 0; }
         if (resetRect_.Contains(x, y)) { ResetPresets(); return 0; }
         if (svRect_.Contains(x, y)) {
             drag_ = 0;

@@ -163,6 +163,7 @@ bool DocView::Create(HWND parent, int id) {
 }
 
 void DocView::SetSettings(Settings* settings) {
+    if (settings) settings->NormalizeInkPresets();
     settings_ = settings;
     inkColors_.clear();
     if (settings) {

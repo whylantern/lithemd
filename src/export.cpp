@@ -10,6 +10,7 @@
 #include <commdlg.h>
 #include <shlwapi.h>
 #include <wincodec.h>
+#include <dwmapi.h>
 #include <windowsx.h>
 
 namespace {
@@ -248,6 +249,13 @@ bool ExportWindow::Create(HWND owner) {
     }
     ShowWindow(hwnd_, SW_SHOWNORMAL);
     SetForegroundWindow(hwnd_);
+    {
+        bool dark = settings_ && settings_->dark;
+        BOOL value = dark ? TRUE : FALSE;
+        DwmSetWindowAttribute(hwnd_, 20, &value, sizeof(value));
+        DwmSetWindowAttribute(hwnd_, 19, &value, sizeof(value));
+        ApplyDarkWindowTheme(hwnd_, dark);
+    }
     return true;
 }
 
