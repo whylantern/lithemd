@@ -797,6 +797,9 @@ void DrawDelimiter(ID2D1RenderTarget* target, ID2D1SolidColorBrush* brush, wchar
     auto begin = [&](float px, float py) {
         sink->BeginFigure(D2D1::Point2F(px, py), D2D1_FIGURE_BEGIN_HOLLOW);
     };
+    // Keep the original upper-lobe style (and width); only its direction was
+    // wrong. The lower half is the same curve mirrored vertically.
+    float braceW = w;
     // The caller anchors each glyph at its outer edge. Parenthesis tips sit
     // on that anchor and the curve bows toward the enclosed content, so the
     // left glyph opens right and the right glyph opens left.
@@ -823,21 +826,27 @@ void DrawDelimiter(ID2D1RenderTarget* target, ID2D1SolidColorBrush* brush, wchar
         sink->AddLine(D2D1::Point2F(x, bottom));
         sink->AddLine(D2D1::Point2F(x - w * 0.75f, bottom));
     } else if (ch == L'{') {
-        begin(x, top);
-        sink->AddBezier(D2D1::BezierSegment(D2D1::Point2F(x + w, top), D2D1::Point2F(x + w * 0.15f, top + height * 0.25f),
-                                           D2D1::Point2F(x + w * 0.75f, top + height * 0.45f)));
-        sink->AddLine(D2D1::Point2F(x + w * 0.2f, top + height * 0.5f));
-        sink->AddBezier(D2D1::BezierSegment(D2D1::Point2F(x + w * 0.75f, bottom - height * 0.45f),
-                                           D2D1::Point2F(x + w * 0.15f, bottom - height * 0.25f),
-                                           D2D1::Point2F(x + w, bottom)));
+        // Take the original (correct-looking) upper lobe, flip it horizontally
+        // so its tip opens toward the content, and mirror that curve below.
+        begin(x + braceW, top);
+        sink->AddBezier(D2D1::BezierSegment(
+            D2D1::Point2F(x, top),
+            D2D1::Point2F(x + braceW * 0.85f, top + height * 0.25f),
+            D2D1::Point2F(x + braceW * 0.25f, top + height * 0.5f)));
+        sink->AddBezier(D2D1::BezierSegment(
+            D2D1::Point2F(x + braceW * 0.85f, bottom - height * 0.25f),
+            D2D1::Point2F(x, bottom),
+            D2D1::Point2F(x + braceW, bottom)));
     } else if (ch == L'}') {
-        begin(x, top);
-        sink->AddBezier(D2D1::BezierSegment(D2D1::Point2F(x - w, top), D2D1::Point2F(x - w * 0.15f, top + height * 0.25f),
-                                           D2D1::Point2F(x - w * 0.75f, top + height * 0.45f)));
-        sink->AddLine(D2D1::Point2F(x - w * 0.2f, top + height * 0.5f));
-        sink->AddBezier(D2D1::BezierSegment(D2D1::Point2F(x - w * 0.75f, bottom - height * 0.45f),
-                                           D2D1::Point2F(x - w * 0.15f, bottom - height * 0.25f),
-                                           D2D1::Point2F(x - w, bottom)));
+        begin(x - braceW, top);
+        sink->AddBezier(D2D1::BezierSegment(
+            D2D1::Point2F(x, top),
+            D2D1::Point2F(x - braceW * 0.85f, top + height * 0.25f),
+            D2D1::Point2F(x - braceW * 0.25f, top + height * 0.5f)));
+        sink->AddBezier(D2D1::BezierSegment(
+            D2D1::Point2F(x - braceW * 0.85f, bottom - height * 0.25f),
+            D2D1::Point2F(x, bottom),
+            D2D1::Point2F(x - braceW, bottom)));
     } else if (ch == L'⌊') {
         begin(x, top);
         sink->AddLine(D2D1::Point2F(x, bottom));
