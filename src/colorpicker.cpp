@@ -80,9 +80,9 @@ Color HsvToColor(int hue, float sat, float val, int alpha) {
 } // namespace
 
 ColorPickerWindow::ColorPickerWindow(HWND owner, Settings* settings, int presetIndex, Color initial,
-                                     ChangedFn onChanged)
+                                     ChangedFn onChanged, AppliedFn onApplied)
     : owner_(owner), settings_(settings), presetIndex_(presetIndex),
-      onChanged_(std::move(onChanged)) {
+      onChanged_(std::move(onChanged)), onApplied_(std::move(onApplied)) {
     if (settings_ && settings_->inkPresets.empty())
         settings_->inkPresets = DefaultInkPresets();
     r_ = ToByte(initial.r);
@@ -254,6 +254,22 @@ void ColorPickerWindow::NewPreset() {
     InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
+void ColorPickerWindow::ResetPresets() {
+    if (!settings_) return;
+    settings_->inkPresets = DefaultInkPresets();
+    settings_->inkToolbarPresets = { 0, 1, 2, 3, 4 };
+    settings_->Save();
+    presetIndex_ = 0;
+    creatingNew_ = false;
+    Color color = settings_->inkPresets[0];
+    r_ = ToByte(color.r); g_ = ToByte(color.g); b_ = ToByte(color.b); a_ = ToByte(color.a);
+    UpdateHsvFromRgb();
+    SyncEdits();
+    if (onChanged_) onChanged_();
+    if (onApplied_) onApplied_(0);
+    InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
 void ColorPickerWindow::ReplacePreset(int index) {
     if (!settings_ || index < 0 || index >= (int)settings_->inkPresets.size()) return;
     settings_->inkPresets[(size_t)index] = Current();
@@ -293,6 +309,7 @@ void ColorPickerWindow::Apply() {
         settings_->Save();
     }
     if (onChanged_) onChanged_();
+    if (onApplied_) onApplied_(presetIndex_);
     Close();
 }
 
@@ -343,6 +360,12 @@ void ColorPickerWindow::Paint() {
     c.DrawText(L"新建", newRect_.x, newRect_.y, newRect_.w, newRect_.h, 12,
                canNew ? p.fg : p.muted, false, false,
                DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, false);
+    resetRect_ = { 146, 334, 120, 32 };
+    c.FillRound(resetRect_.x, resetRect_.y, resetRect_.w, resetRect_.h, 7, p.surface);
+    c.StrokeRound(resetRect_.x, resetRect_.y, resetRect_.w, resetRect_.h, 7, p.border);
+    c.DrawText(L"恢复默认", resetRect_.x, resetRect_.y, resetRect_.w, resetRect_.h, 12,
+               p.fg, false, false, DWRITE_TEXT_ALIGNMENT_CENTER,
+               DWRITE_PARAGRAPH_ALIGNMENT_CENTER, false);
     c.DrawText(L"主栏颜色 " + std::to_wstring(ToolbarCount()) + L"/5", 18, 376, 200, 18, 10.5f,
                p.muted, false, false, DWRITE_TEXT_ALIGNMENT_LEADING,
                DWRITE_PARAGRAPH_ALIGNMENT_NEAR, false);
@@ -473,6 +496,7 @@ LRESULT ColorPickerWindow::Handle(UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         }
         if (newRect_.Contains(x, y)) { NewPreset(); return 0; }
+        if (resetRect_.Contains(x, y)) { ResetPresets(); return 0; }
         if (svRect_.Contains(x, y)) {
             drag_ = 0;
             sat_ = std::clamp((x - svRect_.x) / svRect_.w, 0.0f, 1.0f);

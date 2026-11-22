@@ -23,6 +23,10 @@ float DistanceToSegment(float px, float py, float ax, float ay, float bx, float 
     return std::sqrt((px - qx) * (px - qx) + (py - qy) * (py - qy));
 }
 
+bool ShiftHeld() {
+    return (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+}
+
 LRESULT CALLBACK InkEditSubclassProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
                                      UINT_PTR, DWORD_PTR) {
     if (msg == WM_KEYDOWN) {
@@ -200,6 +204,8 @@ void DocView::ClearAnnotations() {
     inkLassoing_ = false;
     inkLasso_.clear();
     pdfHighlighting_ = false;
+    inkDrawing_ = false;
+    inkFreehandActive_ = false;
     notesDirty_ = false;
     notesError_.clear();
     InvalidateAll();
@@ -220,7 +226,7 @@ bool DocView::SaveNotes(std::wstring* error) {
         return false;
     }
     if (inkEdit_) InkCommitText();
-    if (inkDrawing_ || inkShapeDrawing_) InkEnd();
+    if (inkDrawing_ || inkFreehandActive_ || inkShapeDrawing_) InkEnd();
 
     JNode root = NoteObject();
     root.members.emplace_back(L"version", NoteInt(1));
@@ -641,6 +647,7 @@ bool DocView::InkScreenToContent(float sx, float sy, float& cx, float& cy) const
         cy = (sy - y) / h;
         return true;
     }
+    if (sx < 0 || sy < 0 || sx > PageWidth() || sy > heightDip()) return false;
     cx = sx + scrollX_;
     cy = sy + scrollY_;
     return true;
@@ -1256,6 +1263,7 @@ void DocView::InkPushUndo() {
     snap.shapes = layer.shapes;
     snap.texts = layer.texts;
     snap.textHighlights = textHighlights_;
+    snap.pdfHighlights = pdfHighlights_;
     layer.undo.push_back(std::move(snap));
     if (layer.undo.size() > 60) layer.undo.erase(layer.undo.begin());
     layer.redo.clear();
@@ -1270,6 +1278,7 @@ void DocView::InkUndo() {
     current.shapes = layer.shapes;
     current.texts = layer.texts;
     current.textHighlights = textHighlights_;
+    current.pdfHighlights = pdfHighlights_;
     layer.redo.push_back(std::move(current));
     if (layer.redo.size() > 60) layer.redo.erase(layer.redo.begin());
     InkSnapshot snap = std::move(layer.undo.back());
@@ -1278,6 +1287,7 @@ void DocView::InkUndo() {
     layer.shapes = std::move(snap.shapes);
     layer.texts = std::move(snap.texts);
     textHighlights_ = std::move(snap.textHighlights);
+    pdfHighlights_ = std::move(snap.pdfHighlights);
     inkSelection_.clear();
     MarkNotesDirty();
     InvalidateAll();
@@ -1290,6 +1300,8 @@ void DocView::InkRedo() {
     current.strokes = layer.strokes;
     current.shapes = layer.shapes;
     current.texts = layer.texts;
+    current.textHighlights = textHighlights_;
+    current.pdfHighlights = pdfHighlights_;
     layer.undo.push_back(std::move(current));
     if (layer.undo.size() > 60) layer.undo.erase(layer.undo.begin());
     InkSnapshot snap = std::move(layer.redo.back());
@@ -1298,25 +1310,52 @@ void DocView::InkRedo() {
     layer.shapes = std::move(snap.shapes);
     layer.texts = std::move(snap.texts);
     textHighlights_ = std::move(snap.textHighlights);
+    pdfHighlights_ = std::move(snap.pdfHighlights);
     inkSelection_.clear();
     MarkNotesDirty();
     InvalidateAll();
 }
 
+void DocView::FinalizeInkSegment() {
+    if (!inkDrawing_) return;
+    // Shift turns the freehand pen into a straight line between the first
+    // point and the current point. The raw samples are kept while dragging so
+    // releasing Shift can restore the freehand curve without losing input.
+    if (inkTool_ == INK_TOOL_PEN && ShiftHeld() && inkCurrent_.points.size() > 2) {
+        InkPoint first = inkCurrent_.points.front();
+        InkPoint last = inkCurrent_.points.back();
+        inkCurrent_.points.clear();
+        inkCurrent_.points.push_back(first);
+        inkCurrent_.points.push_back(last);
+    }
+    if (!inkCurrent_.points.empty()) Ink().strokes.push_back(inkCurrent_);
+    inkCurrent_.points.clear();
+    inkDrawing_ = false;
+}
+
 void DocView::InkClear() {
     auto& layer = Ink();
-    if (layer.strokes.empty() && layer.shapes.empty() && layer.texts.empty() &&
-        inkCurrent_.points.empty() && !inkShapeDrawing_) return;
+    bool hasLayer = !layer.strokes.empty() || !layer.shapes.empty() || !layer.texts.empty();
+    bool hasHighlights = !textHighlights_.empty() || !textHighlightPending_.empty() ||
+                         !pdfHighlights_.empty();
+    if (!hasLayer && !hasHighlights && inkCurrent_.points.empty() && !inkShapeDrawing_) return;
     InkPushUndo();
     layer.strokes.clear();
     layer.shapes.clear();
     layer.texts.clear();
     textHighlights_.clear();
+    textHighlightPending_.clear();
+    textHighlighting_ = false;
+    pdfHighlights_.clear();
+    pdfHighlighting_ = false;
     inkSelection_.clear();
     inkCurrent_.points.clear();
     inkCurrentShape_ = InkShape{};
     inkShapeDrawing_ = false;
+    inkDrawing_ = false;
+    inkFreehandActive_ = false;
     if (inkEdit_) InkCancelText();
+    MarkNotesDirty();
     InvalidateAll();
 }
 
@@ -1381,7 +1420,35 @@ void DocView::InkDrawStroke(Canvas& c, const InkStroke& stroke) {
         InkContentToScreen(point.x, point.y, x, y);
         points.push_back(D2D1::Point2F(x, y));
     }
-    c.DrawStrokePath(points.data(), points.size(), color, width);
+    // Mouse messages are sparse during fast strokes. Draw a Catmull-Rom
+    // interpolation instead of connecting samples with visible straight lines.
+    if (points.size() > 2) {
+        std::vector<D2D1_POINT_2F> smooth;
+        smooth.reserve(points.size() * 4);
+        smooth.push_back(points.front());
+        for (size_t i = 1; i + 1 < points.size(); i++) {
+            const D2D1_POINT_2F& p0 = points[i - 1];
+            const D2D1_POINT_2F& p1 = points[i];
+            const D2D1_POINT_2F& p2 = points[i + 1];
+            const D2D1_POINT_2F& p3 = points[std::min(i + 2, points.size() - 1)];
+            for (int step = 1; step <= 4; step++) {
+                float t = step / 4.0f;
+                float t2 = t * t;
+                float t3 = t2 * t;
+                float x = 0.5f * (2 * p1.x + (-p0.x + p2.x) * t +
+                                  (2 * p0.x - 5 * p1.x + 4 * p2.x - p3.x) * t2 +
+                                  (-p0.x + 3 * p1.x - 3 * p2.x + p3.x) * t3);
+                float y = 0.5f * (2 * p1.y + (-p0.y + p2.y) * t +
+                                  (2 * p0.y - 5 * p1.y + 4 * p2.y - p3.y) * t2 +
+                                  (-p0.y + 3 * p1.y - 3 * p2.y + p3.y) * t3);
+                smooth.push_back(D2D1::Point2F(x, y));
+            }
+        }
+        smooth.push_back(points.back());
+        c.DrawStrokePath(smooth.data(), smooth.size(), color, width);
+    } else {
+        c.DrawStrokePath(points.data(), points.size(), color, width);
+    }
 }
 
 float DocView::InkTextWidth(const std::wstring& text, float size) const {
@@ -1456,7 +1523,20 @@ void DocView::PaintInk(Canvas& c, bool exportOnly) {
     for (auto& stroke : layer.strokes) InkDrawStroke(c, stroke);
     for (auto& shape : layer.shapes) InkDrawShape(c, shape);
     for (auto& text : layer.texts) InkDrawTextItem(c, text);
-    if (inkDrawing_) InkDrawStroke(c, inkCurrent_);
+    if (inkDrawing_) {
+        // Match the pen's Shift preview with FinalizeInkSegment's commit.
+        if (inkTool_ == INK_TOOL_PEN && ShiftHeld() && inkCurrent_.points.size() > 2) {
+            InkStroke line;
+            line.color = inkCurrent_.color;
+            line.width = inkCurrent_.width;
+            line.highlighter = inkCurrent_.highlighter;
+            line.points.push_back(inkCurrent_.points.front());
+            line.points.push_back(inkCurrent_.points.back());
+            InkDrawStroke(c, line);
+        } else {
+            InkDrawStroke(c, inkCurrent_);
+        }
+    }
     if (inkShapeDrawing_) InkDrawShape(c, inkCurrentShape_);
     if (imageClip) c.PopClip();
     if (!exportOnly && inkTool_ == INK_TOOL_SELECT) InkPaintSelection(c);
@@ -1628,7 +1708,9 @@ void DocView::PaintInkToolbar(Canvas& c) {
     widthButton(INK_WIDTH_UP, 24, L"+");
 
     button(INK_UNDO, 40, L"撤销", false, !Ink().undo.empty());
-    bool hasContent = !Ink().strokes.empty() || !Ink().shapes.empty() || !Ink().texts.empty();
+    bool hasContent = !Ink().strokes.empty() || !Ink().shapes.empty() || !Ink().texts.empty() ||
+                      !textHighlights_.empty() || !textHighlightPending_.empty() ||
+                      !pdfHighlights_.empty();
     button(INK_CLEAR, 44, L"清空", false, hasContent);
     button(INK_DONE, 44, L"完成", true, true);
 
@@ -1669,7 +1751,7 @@ void DocView::PaintInkToolbar(Canvas& c) {
         float itemW = 34, panelW = hiddenCount * itemW + 8, panelH = 38;
         float px = 8.0f;
         if (moreButton.w > 0) {
-            // Anchor under the “⋯” button, then clamp back into the toolbar
+            // Anchor under the "..." button, then clamp back into the toolbar
             // width; if there is no room, fall back to the far left.
             px = moreButton.x + (moreButton.w - panelW) / 2;
             px = std::min(px, c.widthDip() - panelW - 8);
@@ -1779,6 +1861,25 @@ void DocView::InkAction(int action) {
     InvalidateAll();
 }
 
+static void ConstrainShapeEnd(int kind, const InkPoint& a, InkPoint& end, bool shift) {
+    if (!shift) return;
+    float dx = end.x - a.x;
+    float dy = end.y - a.y;
+    if (kind == INK_SHAPE_LINE || kind == INK_SHAPE_ARROW) {
+        float len = std::sqrt(dx * dx + dy * dy);
+        if (len < 0.001f) return;
+        float angle = std::atan2(dy, dx);
+        const float step = 3.14159265358979323846f / 4.0f;
+        angle = std::round(angle / step) * step;
+        end.x = a.x + std::cos(angle) * len;
+        end.y = a.y + std::sin(angle) * len;
+    } else if (kind == INK_SHAPE_ELLIPSE || kind == INK_SHAPE_RECT) {
+        float radius = std::max(std::abs(dx), std::abs(dy));
+        end.x = a.x + (dx < 0 ? -radius : radius);
+        end.y = a.y + (dy < 0 ? -radius : radius);
+    }
+}
+
 void DocView::InkBegin(float x, float y) {
     if (!CanAnnotate()) return;
     if (inkEdit_) InkCommitText();
@@ -1807,6 +1908,7 @@ void DocView::InkBegin(float x, float y) {
         inkCurrent_.highlighter = true;
         inkCurrent_.points.push_back({ cx, cy });
         inkDrawing_ = true;
+        inkFreehandActive_ = true;
         SetCapture(hwnd_);
         InvalidateAll();
         return;
@@ -1818,6 +1920,7 @@ void DocView::InkBegin(float x, float y) {
         inkCurrent_.width = inkWidth_;
         inkCurrent_.points.push_back({ cx, cy });
         inkDrawing_ = true;
+        inkFreehandActive_ = true;
         SetCapture(hwnd_);
         InvalidateAll();
         return;
@@ -1840,15 +1943,26 @@ void DocView::InkMove(float x, float y) {
         UpdateTextHighlight(x, y);
         return;
     }
-    if (inkDrawing_) {
+    if (inkFreehandActive_) {
         float cx = 0, cy = 0;
-        if (!InkScreenToContent(x, y, cx, cy)) return;
+        if (!InkScreenToContent(x, y, cx, cy)) {
+            // Do not connect the last outside point to the next inside point.
+            FinalizeInkSegment();
+            return;
+        }
+        if (!inkDrawing_) {
+            inkCurrent_.points.clear();
+            inkCurrent_.points.push_back({ cx, cy });
+            inkDrawing_ = true;
+            InvalidateAll();
+            return;
+        }
         if (!inkCurrent_.points.empty()) {
             auto& last = inkCurrent_.points.back();
             float lx = 0, ly = 0;
             InkContentToScreen(last.x, last.y, lx, ly);
             float dx = x - lx, dy = y - ly;
-            if (dx * dx + dy * dy < 1.5f * 1.5f) return;
+            if (dx * dx + dy * dy < 1.0f) return;
         }
         inkCurrent_.points.push_back({ cx, cy });
         InvalidateAll();
@@ -1857,17 +1971,21 @@ void DocView::InkMove(float x, float y) {
     } else if (inkShapeDrawing_) {
         float cx = 0, cy = 0;
         if (!InkScreenToContent(x, y, cx, cy)) return;
-        inkCurrentShape_.b = { cx, cy };
+        InkPoint end{ cx, cy };
+        bool shift = ShiftHeld();
+        ConstrainShapeEnd(inkCurrentShape_.kind, inkCurrentShape_.a, end, shift);
+        inkCurrentShape_.b = end;
         InvalidateAll();
     }
 }
 
 void DocView::InkEraseAt(float x, float y) {
     auto& layer = Ink();
-    if (layer.strokes.empty() && layer.shapes.empty() && layer.texts.empty()) return;
     float radius = std::max(6.0f, inkWidth_ * 2.0f);
     std::set<int> hitGroups;
     std::set<std::pair<int, int>> hitItems;
+    std::vector<int> textHits;
+    std::vector<std::pair<int, int>> pdfHits;
     auto hit = [&](int kind, int index, int group) {
         if (group) hitGroups.insert(group);
         else hitItems.insert({ kind, index });
@@ -1933,10 +2051,50 @@ void DocView::InkEraseAt(float x, float y) {
             y >= sy - radius && y <= sy + h + radius) hit(2, i, t.group);
     }
 
-    if (hitGroups.empty() && hitItems.empty()) return;
+    // Text highlights are not ink strokes; hit-test their actual DWrite ranges.
+    CollectTextHighlightHits(x, y, radius, textHits);
+    if (!pdfHighlights_.empty()) {
+        for (auto& entry : pdfHighlights_) {
+            float px = 0, py = 0, pw = 0, ph = 0;
+            if (!PdfPageRect(entry.first, px, py, pw, ph)) continue;
+            for (int i = 0; i < (int)entry.second.size(); i++) {
+                for (auto& r : entry.second[(size_t)i].rects) {
+                    float rx = px + r.x * pw, ry = py + r.y * ph;
+                    float rw = r.w * pw, rh = r.h * ph;
+                    if (x >= rx - radius && x <= rx + rw + radius &&
+                        y >= ry - radius && y <= ry + rh + radius) {
+                        pdfHits.push_back({ entry.first, i });
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    if (hitGroups.empty() && hitItems.empty() && textHits.empty() && pdfHits.empty()) return;
     if (!inkErasePushed_) {
         InkPushUndo();
         inkErasePushed_ = true;
+    }
+    if (!textHits.empty()) {
+        std::sort(textHits.rbegin(), textHits.rend());
+        for (int index : textHits)
+            if (index >= 0 && index < (int)textHighlights_.size())
+                textHighlights_.erase(textHighlights_.begin() + index);
+        MarkNotesDirty();
+    }
+    if (!pdfHits.empty()) {
+        std::sort(pdfHits.begin(), pdfHits.end(), [](auto& a, auto& b) {
+            return a.first != b.first ? a.first < b.first : a.second > b.second;
+        });
+        for (auto& hit : pdfHits) {
+            auto it = pdfHighlights_.find(hit.first);
+            if (it == pdfHighlights_.end()) continue;
+            if (hit.second >= 0 && hit.second < (int)it->second.size())
+                it->second.erase(it->second.begin() + hit.second);
+            if (it->second.empty()) pdfHighlights_.erase(it);
+        }
+        MarkNotesDirty();
     }
     auto remove = [&](int kind, int index, int group) {
         return (group && hitGroups.count(group)) || hitItems.count({ kind, index });
@@ -1965,12 +2123,13 @@ void DocView::InkEnd() {
         FinishTextHighlight();
         return;
     }
-    if (inkDrawing_) {
-        if (!inkCurrent_.points.empty()) Ink().strokes.push_back(std::move(inkCurrent_));
-        inkCurrent_ = InkStroke{};
-        inkDrawing_ = false;
+    if (inkFreehandActive_) {
+        FinalizeInkSegment();
+        inkFreehandActive_ = false;
     }
     if (inkShapeDrawing_) {
+        bool shift = ShiftHeld();
+        ConstrainShapeEnd(inkCurrentShape_.kind, inkCurrentShape_.a, inkCurrentShape_.b, shift);
         float ax = 0, ay = 0, bx = 0, by = 0;
         InkContentToScreen(inkCurrentShape_.a.x, inkCurrentShape_.a.y, ax, ay);
         InkContentToScreen(inkCurrentShape_.b.x, inkCurrentShape_.b.y, bx, by);
@@ -2065,7 +2224,7 @@ void DocView::SetInkMode(bool on) {
     if (inkMode_ == on) return;
     if (!on) {
         if (inkEdit_) InkCommitText();
-        if (inkDrawing_ || inkErasing_ || inkShapeDrawing_) InkEnd();
+        if (inkDrawing_ || inkFreehandActive_ || inkErasing_ || inkShapeDrawing_) InkEnd();
         inkDragMode_ = 0;
         inkLassoing_ = false;
         inkLasso_.clear();
@@ -2094,4 +2253,5 @@ void DocView::RedoInk() {
     if (!inkMode_) return;
     InkRedo();
 }
+
 

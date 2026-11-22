@@ -253,11 +253,16 @@ private:
         int length = 0;
         Color color = Color(1.0f, 0.82f, 0.18f, 0.34f);
     };
+    struct PdfHighlight {
+        std::vector<DRect> rects; // normalized page coordinates, y down
+        Color color = Color(1.0f, 0.82f, 0.18f, 0.34f);
+    };
     struct InkSnapshot {
         std::vector<InkStroke> strokes;
         std::vector<InkShape> shapes;
         std::vector<InkText> texts;
         std::vector<TextHighlight> textHighlights;
+        std::map<int, std::vector<PdfHighlight>> pdfHighlights;
     };
     struct InkLayer {
         std::vector<InkStroke> strokes;
@@ -271,10 +276,6 @@ private:
         int kind = 0; // 0 stroke, 1 shape, 2 text
         int index = -1;
     };
-    struct PdfHighlight {
-        std::vector<DRect> rects; // normalized page coordinates, y down
-        Color color = Color(1.0f, 0.82f, 0.18f, 0.34f);
-    };
     struct InkButton {
         DRect rect;
         int action = 0;
@@ -282,6 +283,7 @@ private:
     bool inkMode_ = false;
     int inkTool_ = 0; // 0 pen, 1 eraser, 2 line, 3 arrow, 4 rectangle, 5 ellipse, 6 text, 7 select, 8 PDF highlighter
     bool inkDrawing_ = false;
+    bool inkFreehandActive_ = false;
     bool inkErasing_ = false;
     bool inkErasePushed_ = false;
     bool inkShapeDrawing_ = false;
@@ -444,8 +446,10 @@ private:
     void UpdateTextHighlight(float sx, float sy);
     void FinishTextHighlight();
     void PaintTextHighlights(class Canvas& c);
+    void CollectTextHighlightHits(float sx, float sy, float radius, std::vector<int>& hits) const;
     void PaintPdfHighlights(class Canvas& c, int page, float x, float y, float w, float h);
     void InkClear();
+    void FinalizeInkSegment();
     void InkScaleForZoom(float factor);
     void InkDrawStroke(class Canvas& c, const InkStroke& stroke);
     void InkDrawShape(class Canvas& c, const InkShape& shape);

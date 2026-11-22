@@ -1503,6 +1503,24 @@ bool CanShowSource(DocKind kind) {
     }
 }
 
+bool IsCodeTextPath(const std::wstring& path) {
+    std::wstring ext = PathExt(path);
+    static const wchar_t* kCodeExts[] = {
+        L".c", L".cc", L".cpp", L".cxx", L".c++", L".h", L".hh", L".hpp", L".hxx",
+        L".inl", L".ipp", L".cs", L".java", L".kt", L".kts", L".py", L".pyw",
+        L".js", L".jsx", L".mjs", L".cjs", L".ts", L".tsx", L".css", L".scss",
+        L".less", L".html", L".htm", L".sh", L".bash", L".zsh", L".fish", L".bat",
+        L".cmd", L".ps1", L".rs", L".go", L".rb", L".php", L".pl", L".lua",
+        L".swift", L".m", L".mm", L".sql", L".asm", L".s", L".r", L".dart",
+        L".vue", L".svelte", L".gradle", L".mk", L".cmake", L".make", L".vb",
+        L".fs", L".fsx", L".clj", L".cljs", L".ex", L".exs", L".erl", L".hrl",
+        L".hs", L".lhs", L".scala", L".groovy", L".proto", L".graphql"
+    };
+    for (auto codeExt : kCodeExts)
+        if (ext == codeExt) return true;
+    return false;
+}
+
 static bool LooksLikeCsv(const std::wstring& text) {
     std::wstring t = NormalizeNewlines(text);
     std::wstring first = t.substr(0, std::min<size_t>(t.size(), 4000));
@@ -1580,6 +1598,7 @@ DocKind DetectKind(const std::wstring& path, const std::wstring& text) {
     }
     if (ext == L".txt" || ext == L".log" || ext == L".yml" || ext == L".yaml" ||
         ext == L".xml" || ext == L".ini" || ext == L".toml") return DocKind::Text;
+    if (IsCodeTextPath(path)) return DocKind::Text;
 
     std::wstring t = Trim(text);
     if (!t.empty() && (t[0] == L'{' || t[0] == L'[')) {

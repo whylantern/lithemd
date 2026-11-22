@@ -12,9 +12,10 @@
 class ColorPickerWindow {
 public:
     using ChangedFn = std::function<void()>;
+    using AppliedFn = std::function<void(int)>;
 
     ColorPickerWindow(HWND owner, Settings* settings, int presetIndex, Color initial,
-                      ChangedFn onChanged);
+                      ChangedFn onChanged, AppliedFn onApplied = {});
     ~ColorPickerWindow();
 
     bool Create();
@@ -32,6 +33,7 @@ private:
     void UpdateHsvFromRgb();
     void SelectPreset(int index);
     void NewPreset();
+    void ResetPresets();
     void ReplacePreset(int index);
     void ToggleToolbarPreset(int index);
     void Apply();
@@ -52,6 +54,7 @@ private:
     bool updating_ = false;
     int drag_ = -1;        // 0 saturation/value, 1 hue, 2 alpha
     ChangedFn onChanged_;
+    AppliedFn onApplied_;
     HWND edits_[5]{};      // R,G,B,A,hex
     std::unique_ptr<class Canvas> canvas_;
 
@@ -62,6 +65,7 @@ private:
     DRect presetRects_[12];
     DRect pinRects_[12];
     DRect newRect_;
+    DRect resetRect_;
     DRect applyRect_;
     DRect cancelRect_;
 };

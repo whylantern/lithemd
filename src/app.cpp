@@ -3183,6 +3183,24 @@ private:
             [this] {
                 ForEachView([this](DocView* v) { v->SetSettings(&settings_); });
                 InvalidateChrome();
+            },
+            [this](int index) {
+                if (index < 0 || index >= (int)settings_.inkPresets.size()) return;
+                auto& slots = settings_.inkToolbarPresets;
+                auto it = std::find(slots.begin(), slots.end(), index);
+                if (it == slots.end()) {
+                    if (slots.size() < 5) slots.push_back(index);
+                    else slots.back() = index;
+                    settings_.Save();
+                }
+                ForEachView([this, index](DocView* v) {
+                    v->SetSettings(&settings_);
+                    auto pos = std::find(settings_.inkToolbarPresets.begin(),
+                                         settings_.inkToolbarPresets.end(), index);
+                    if (pos != settings_.inkToolbarPresets.end())
+                        v->SelectInkColor((int)(pos - settings_.inkToolbarPresets.begin()));
+                });
+                InvalidateChrome();
             });
         if (!win->Create()) delete win;
     }

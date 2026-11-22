@@ -81,7 +81,8 @@ const std::map<std::wstring, std::wstring>& EnglishMap() {
 
         { L"轻量本地文档阅读器", L"Lightweight local document reader" },
         { L"打开文件", L"Open file" }, { L"最近打开", L"Recent" },
-        { L"纯文本", L"Plain text" }, { L"个节点", L" nodes" },
+        { L"纯文本", L"Plain text" }, { L"源代码", L"Source code" },
+        { L"个节点", L" nodes" },
         { L"个工作表", L" sheets" }, { L"个段落", L" paragraphs" },
         { L"个块", L" blocks" }, { L"行", L" lines" }, { L"页", L" pages" },
 

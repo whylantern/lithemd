@@ -664,7 +664,7 @@ static std::unique_ptr<Document> LoadDocumentImpl(const std::wstring& pathIn, st
         doc->sourceAllowed = true;
     } else {
         doc->kind = DocKind::Text;
-        doc->subtitle = L"纯文本";
+        doc->subtitle = IsCodeTextPath(path) ? L"源代码" : L"纯文本";
         doc->sourceDefault = true;
         doc->sourceAllowed = true;
         doc->meta = std::to_wstring(doc->lines) + L" 行";

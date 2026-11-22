@@ -101,6 +101,7 @@ enum class DocKind {
 std::wstring DocKindName(DocKind kind);
 bool IsBinaryKind(DocKind kind);
 bool CanShowSource(DocKind kind);
+bool IsCodeTextPath(const std::wstring& path);
 // Identifies a document by extension and content sniffing. Text is only used
 // for extension-less/unknown files; binary formats are detected by extension.
 DocKind DetectKind(const std::wstring& path, const std::wstring& text);

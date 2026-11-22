@@ -297,7 +297,7 @@ void DocView::ClearDocument() {
     inkLayers_.clear();
     inkCurrent_ = InkStroke{};
     inkCurrentShape_ = InkShape{};
-    inkDrawing_ = inkErasing_ = inkShapeDrawing_ = false;
+    inkDrawing_ = inkErasing_ = inkShapeDrawing_ = inkFreehandActive_ = false;
     inkErasePushed_ = false;
     inkMode_ = false;
     inkMoreOpen_ = false;
@@ -375,7 +375,7 @@ void DocView::SetDocument(std::unique_ptr<Document> doc, bool preserveScroll, bo
     inkLayers_.clear();
     inkCurrent_ = InkStroke{};
     inkCurrentShape_ = InkShape{};
-    inkDrawing_ = inkErasing_ = inkShapeDrawing_ = false;
+    inkDrawing_ = inkErasing_ = inkShapeDrawing_ = inkFreehandActive_ = false;
     inkErasePushed_ = false;
     inkMode_ = false;
     inkMoreOpen_ = false;
@@ -456,7 +456,7 @@ void DocView::SetError(const std::wstring& message, const std::wstring& path, co
     inkLayers_.clear();
     inkCurrent_ = InkStroke{};
     inkCurrentShape_ = InkShape{};
-    inkDrawing_ = inkErasing_ = inkShapeDrawing_ = false;
+    inkDrawing_ = inkErasing_ = inkShapeDrawing_ = inkFreehandActive_ = false;
     inkErasePushed_ = false;
     inkMode_ = false;
     inkMoreOpen_ = false;
@@ -498,7 +498,8 @@ bool DocView::CanOutline() const {
 void DocView::SetSource(bool source) {
     if (!doc_ || !CanSource() || sourceMode_ == source) return;
     if (inkEdit_) InkCommitText();
-    if (inkDrawing_ || inkErasing_ || inkShapeDrawing_ || textHighlighting_) InkEnd();
+    if (inkDrawing_ || inkFreehandActive_ || inkErasing_ || inkShapeDrawing_ ||
+        textHighlighting_) InkEnd();
     inkHover_ = 0;
     inkButtons_.clear();
     inkSelection_.clear();
@@ -1355,7 +1356,7 @@ bool DocView::ExportPng(float scale, std::vector<uint8_t>& png, std::wstring* er
         if (error) *error = L"当前没有可导出的内容";
         return false;
     }
-    if (inkDrawing_ || inkShapeDrawing_) InkEnd();
+    if (inkDrawing_ || inkFreehandActive_ || inkShapeDrawing_) InkEnd();
     float viewW = PageWidth();
     float contentH = ContentHeightDip();
     if (viewW < 1 || contentH < 1) {
@@ -1405,7 +1406,7 @@ bool DocView::ExportPngPage(float scale, float offsetY, float pageHeight,
         if (error) *error = L"当前没有可导出的内容";
         return false;
     }
-    if (inkDrawing_ || inkShapeDrawing_) InkEnd();
+    if (inkDrawing_ || inkFreehandActive_ || inkShapeDrawing_) InkEnd();
     float viewW = PageWidth();
     if (viewW < 1 || pageHeight < 1) {
         if (error) *error = L"窗口尺寸无效";
@@ -1675,6 +1676,7 @@ void DocView::PaintWelcome(Canvas& c) {
             heights[(size_t)i] = wrap ? 54.0f : 38.0f;
             welcomeRecentContentH_ += heights[(size_t)i];
         }
+        welcomeRecentContentH_ += 28.0f; // list footer
         float maxScroll = std::max(0.0f, welcomeRecentContentH_ - welcomeRecentView_.h);
         welcomeRecentScroll_ = Clampf(welcomeRecentScroll_, 0.0f, maxScroll);
         c.PushClip(welcomeRecentView_.x, welcomeRecentView_.y, welcomeRecentView_.w,
@@ -1709,6 +1711,11 @@ void DocView::PaintWelcome(Canvas& c) {
             welcomeRecentRowIndices_.push_back(i);
             y += rowH;
         }
+        bool allLoaded = shown >= (int)recent_.size();
+        c.DrawText(allLoaded ? L"已加载全部最近记录" : L"继续向下滑动加载更多",
+                   welcomeRecentView_.x, y + 4, welcomeRecentView_.w, 22, 10.5f,
+                   p.muted, false, false, DWRITE_TEXT_ALIGNMENT_CENTER,
+                   DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
         c.PopClip();
     }
 
@@ -1999,6 +2006,42 @@ void DocView::PaintTextHighlights(Canvas& c) {
     };
     drawRanges(textHighlights_, false);
     drawRanges(textHighlightPending_, true);
+}
+
+void DocView::CollectTextHighlightHits(float sx, float sy, float radius,
+                                       std::vector<int>& hits) const {
+    if (!doc_ || !layout_) return;
+    for (int i = 0; i < (int)textHighlights_.size(); i++) {
+        auto& h = textHighlights_[(size_t)i];
+        if (h.block < 0 || h.block >= (int)doc_->blocks.size()) continue;
+        for (auto& item : layout_->items) {
+            if (item.block != &doc_->blocks[(size_t)h.block] || !item.main.layout) continue;
+            int textLen = (int)item.main.text.size();
+            int start = std::clamp(h.start, 0, textLen);
+            int length = std::clamp(h.length, 0, textLen - start);
+            if (length <= 0) break;
+            UINT32 count = 0;
+            item.main.layout->HitTestTextRange((UINT32)start, (UINT32)length, 0, 0,
+                                               nullptr, 0, &count);
+            if (!count) break;
+            std::vector<DWRITE_HIT_TEST_METRICS> metrics(count);
+            if (FAILED(item.main.layout->HitTestTextRange((UINT32)start, (UINT32)length, 0, 0,
+                                                          metrics.data(), count, &count)))
+                break;
+            bool touched = false;
+            for (auto& m : metrics) {
+                float rx = item.contentX + m.left;
+                float ry = item.contentY + m.top - scrollY_;
+                if (sx >= rx - radius && sx <= rx + m.width + radius &&
+                    sy >= ry - radius && sy <= ry + m.height + radius) {
+                    touched = true;
+                    break;
+                }
+            }
+            if (touched) hits.push_back(i);
+            break;
+        }
+    }
 }
 
 bool DocView::BeginTextHighlight(float sx, float sy) {
@@ -2965,7 +3008,8 @@ void DocView::OnMouseUp(int px, int py) {
         FinishPdfHighlight(x0, y0, x, y);
         return;
     }
-    if (inkDrawing_ || inkErasing_ || inkShapeDrawing_ || textHighlighting_) {
+    if (inkDrawing_ || inkFreehandActive_ || inkErasing_ || inkShapeDrawing_ ||
+        textHighlighting_) {
         InkEnd();
         return;
     }
@@ -3023,7 +3067,8 @@ void DocView::OnMouseMove(int px, int py) {
             SetCursor(LoadCursorW(nullptr, IDC_CROSS));
             return;
         }
-        if (inkDrawing_ || inkErasing_ || inkShapeDrawing_ || textHighlighting_) {
+        if (inkDrawing_ || inkFreehandActive_ || inkErasing_ || inkShapeDrawing_ ||
+            textHighlighting_) {
             InkMove(x, y);
             SetCursor(LoadCursorW(nullptr, IDC_CROSS));
             return;
@@ -3487,7 +3532,8 @@ LRESULT DocView::Handle(UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_CAPTURECHANGED:
         if (middlePan_ && (HWND)lp != hwnd_) EndMiddlePan();
-        if ((inkDrawing_ || inkErasing_ || inkShapeDrawing_ || textHighlighting_) && (HWND)lp != hwnd_) InkEnd();
+        if ((inkDrawing_ || inkFreehandActive_ || inkErasing_ || inkShapeDrawing_ ||
+             textHighlighting_) && (HWND)lp != hwnd_) InkEnd();
         if (inkLassoing_ && (HWND)lp != hwnd_) {
             inkLassoing_ = false;
             inkLasso_.clear();
