@@ -71,7 +71,8 @@ if (-not $cxx -or -not $gcc -or -not $windres) {
     exit 1
 }
 
-$defs = @('-DUNICODE', '-D_UNICODE', '-DWIN32_LEAN_AND_MEAN', '-DNOMINMAX', '-D_WIN32_WINNT=0x0A00')
+$defs = @('-DUNICODE', '-D_UNICODE', '-DWIN32_LEAN_AND_MEAN', '-DNOMINMAX', '-D_WIN32_WINNT=0x0A00',
+          '-ffunction-sections', '-fdata-sections')
 $common = @('-std=c++20', '-finput-charset=UTF-8') + $defs
 
 Write-Host 'compiling miniz...'
@@ -130,7 +131,7 @@ $libs = @(
 )
 Write-Host 'linking...'
 Remove-Item -LiteralPath $tmpExe -Force -ErrorAction SilentlyContinue
-& $cxx @common '-mwindows' '-municode' '-static' '-static-libgcc' '-static-libstdc++' '-s' -o $tmpExe @objects @libs
+& $cxx @common '-mwindows' '-municode' '-static' '-static-libgcc' '-static-libstdc++' '-s' '-Wl,--gc-sections' -o $tmpExe @objects @libs
 if ($LASTEXITCODE -ne 0 -or !(Test-Path -LiteralPath $tmpExe)) { throw 'link failed' }
 
 Archive-Dist
