@@ -1,0 +1,28 @@
+#!/bin/sh
+# 提交署名守卫：阻止把提交记到协作方（Shenyun-Z）名下。
+# 绕过方式（仅限本人有意为之）：LITHEMD_ALLOW_SELF=1 git commit ...
+
+email=$(git config user.email 2>/dev/null)
+
+if [ -z "$email" ]; then
+  printf '\n[pre-commit] 未配置 user.email，提交已被拒绝。\n' >&2
+  printf '  请先执行：git config --local user.name  "你的名字"\n' >&2
+  printf '            git config --local user.email "你的邮箱"\n\n' >&2
+  exit 1
+fi
+
+case "$email" in
+  *"+Shenyun-Z@users.noreply.github.com")
+    if [ "${LITHEMD_ALLOW_SELF:-0}" = "1" ]; then
+      exit 0
+    fi
+    printf '\n[pre-commit] 当前 user.email 是协作方 Shenyun-Z 的 GitHub noreply 地址：\n' >&2
+    printf '  %s\n\n' "$email" >&2
+    printf '本仓库不允许把提交记到对方账号名下。请改成你自己的身份：\n' >&2
+    printf '  git config --local user.name  "whylantern"\n' >&2
+    printf '  git config --local user.email "3778216901@qq.com"\n\n' >&2
+    exit 1
+    ;;
+esac
+
+exit 0
