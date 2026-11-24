@@ -8,3 +8,4 @@ config.json
 reading-positions.json
 lithemd-notes/
 translations/
+dist/
