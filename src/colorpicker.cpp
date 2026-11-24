@@ -290,6 +290,10 @@ void ColorPickerWindow::DeletePreset() {
         if (slot == index) slot = -1;
         else if (slot > index) slot--;
     }
+    for (int& slot : settings_->fullscreenInkPresets) {
+        if (slot == index) slot = -1;
+        else if (slot > index) slot--;
+    }
     settings_->NormalizeInkPresets();
     if (presetIndex_ >= (int)settings_->inkPresets.size())
         presetIndex_ = (int)settings_->inkPresets.size() - 1;

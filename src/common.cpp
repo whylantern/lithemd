@@ -1643,6 +1643,8 @@ void Settings::Clamp() {
     backgroundFit = std::clamp(backgroundFit, MinBackgroundFit, MaxBackgroundFit);
     backgroundAnchor = std::clamp(backgroundAnchor, MinBackgroundAnchor, MaxBackgroundAnchor);
     inkToolsVisible &= 0x7F;
+    fullscreenPenWidth = std::clamp(fullscreenPenWidth, MinFullscreenPenWidth, MaxFullscreenPenWidth);
+    fullscreenEraserSize = std::clamp(fullscreenEraserSize, MinFullscreenEraserSize, MaxFullscreenEraserSize);
     canvasWidth = std::clamp(canvasWidth, MinCanvasSize, MaxCanvasSize);
     canvasHeight = std::clamp(canvasHeight, MinCanvasSize, MaxCanvasSize);
     while (uiLanguage.size() >= 2 &&
@@ -1697,6 +1699,19 @@ void Settings::NormalizeInkPresets() {
             slots.push_back(i);
     }
     inkToolbarPresets = std::move(slots);
+    std::vector<int> fs;
+    fs.reserve(3);
+    auto addFs = [&](int index) {
+        if (index < 0 || index >= (int)inkPresets.size() || fs.size() >= 3) return;
+        if (std::find(fs.begin(), fs.end(), index) == fs.end()) fs.push_back(index);
+    };
+    for (int index : fullscreenInkPresets) addFs(index);
+    if (fs.empty()) {
+        for (int i = 0; i < (int)inkPresets.size() && fs.size() < 3; i++) addFs(i);
+    }
+    for (int i = 0; fs.size() < 3 && !inkPresets.empty(); i = (i + 1) % (int)inkPresets.size())
+        fs.push_back(i);
+    fullscreenInkPresets = std::move(fs);
 }
 
 Settings Settings::Load() {
@@ -1786,7 +1801,31 @@ Settings Settings::Load() {
                          m.second.kind == JKind::Array) {
                     s.inkToolbarPresets.clear();
                     for (auto& item : m.second.items)
-                        if (item.kind == JKind::Number) s.inkToolbarPresets.push_back((int)item.number);
+                        if (item.kind == JKind::Number) {
+                            s.inkToolbarPresets.push_back((int)item.number);
+                            if (s.inkToolbarPresets.size() >= 5) break;
+                        }
+                }
+                else if ((key == L"fullscreeninkpresets" || key == L"fullscreeninkcolors") &&
+                         m.second.kind == JKind::Array) {
+                    s.fullscreenInkPresets.clear();
+                    for (auto& item : m.second.items)
+                        if (item.kind == JKind::Number) {
+                            s.fullscreenInkPresets.push_back((int)item.number);
+                            if (s.fullscreenInkPresets.size() >= 3) break;
+                        }
+                }
+                else if (key == L"fullscreentoolbartop") {
+                    std::wstring v = ToLower(NodeText(&m.second));
+                    s.fullscreenToolbarTop = (v == L"true" || v == L"1");
+                }
+                else if (key == L"fullscreenpenwidth")
+                    s.fullscreenPenWidth = (int)m.second.number;
+                else if (key == L"fullscreenerasersize")
+                    s.fullscreenEraserSize = (int)m.second.number;
+                else if (key == L"fullscreentwofingerpan") {
+                    std::wstring v = ToLower(NodeText(&m.second));
+                    s.fullscreenTwoFingerPan = (v == L"true" || v == L"1");
                 }
                 else if (key == L"uilanguage" || key == L"interfacelanguage")
                     s.uiLanguage = NodeText(&m.second);
@@ -1899,6 +1938,18 @@ bool Settings::Save() {
         out += std::to_wstring(inkToolbarPresets[i]);
     }
     out += L"],\n";
+    out += L"  \"fullscreenInkPresets\": [";
+    for (size_t i = 0; i < fullscreenInkPresets.size(); i++) {
+        if (i) out += L", ";
+        out += std::to_wstring(fullscreenInkPresets[i]);
+    }
+    out += L"],\n";
+    out += std::wstring(L"  \"fullscreenToolbarTop\": ") +
+           (fullscreenToolbarTop ? L"true" : L"false") + L",\n";
+    out += L"  \"fullscreenPenWidth\": " + std::to_wstring(fullscreenPenWidth) + L",\n";
+    out += L"  \"fullscreenEraserSize\": " + std::to_wstring(fullscreenEraserSize) + L",\n";
+    out += std::wstring(L"  \"fullscreenTwoFingerPan\": ") +
+           (fullscreenTwoFingerPan ? L"true" : L"false") + L",\n";
     out += L"  \"uiLanguage\": " + JsonEscape(uiLanguage) + L",\n";
     out += L"  \"documentLanguage\": \"" + LanguageConfigName(documentLanguage) + L"\",\n";
     out += L"  \"shortcutsVersion\": 1,\n";

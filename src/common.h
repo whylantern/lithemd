@@ -12,7 +12,7 @@
 #include <vector>
 #include <cstdint>
 
-inline constexpr wchar_t kAppVersion[] = L"2.5.0.0";
+inline constexpr wchar_t kAppVersion[] = L"2.5.1.0";
 
 // ------------------------------------------------------------------ strings
 std::wstring WideFromUtf8(const std::string& s);
@@ -218,6 +218,17 @@ struct Settings {
     // shown on the main ink toolbar; the rest stay in the palette window.
     std::vector<Color> inkPresets;
     std::vector<int> inkToolbarPresets;
+    // Three independent color slots for the desktop full-screen ink toolbar.
+    // They reference the same inkPresets colors but are selected separately.
+    std::vector<int> fullscreenInkPresets;
+    bool fullscreenToolbarTop = false;
+    int fullscreenPenWidth = 3;
+    int fullscreenEraserSize = 18;
+    bool fullscreenTwoFingerPan = true;
+    static constexpr int MinFullscreenPenWidth = 1;
+    static constexpr int MaxFullscreenPenWidth = 12;
+    static constexpr int MinFullscreenEraserSize = 6;
+    static constexpr int MaxFullscreenEraserSize = 64;
     std::wstring uiLanguage = L"zh-CN";
     static constexpr int MinCanvasSize = 256;
     static constexpr int MaxCanvasSize = 8192;

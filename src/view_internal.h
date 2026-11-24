@@ -17,6 +17,7 @@ enum : int {
     INK_WIDTH_DOWN,
     INK_WIDTH_UP,
     INK_UNDO,
+    INK_REDO,
     INK_CLEAR,
     INK_DONE,
     INK_SELECT = 60,

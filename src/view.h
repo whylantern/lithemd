@@ -44,10 +44,40 @@ struct DocViewEvents {
     std::function<void()> sourceModeChanged;
     std::function<void(int)> requestZoom;   // +1 / -1 steps, 0 reset
     std::function<void(int)> openColorPicker; // -1 current color, otherwise preset index
+    std::function<void()> requestFullscreenInk;
 };
 
 struct InkPoint {
     float x = 0, y = 0;
+};
+
+// Shared ink model. The document view stores these in document coordinates;
+// the desktop overlay uses the same types with screen coordinates.
+struct InkStroke {
+    std::vector<InkPoint> points;
+    Color color;
+    float width = 3.0f;
+    int group = 0;
+    bool highlighter = false;
+};
+
+struct InkShape {
+    int kind = 0; // 0 line, 1 arrow, 2 rectangle, 3 ellipse
+    InkPoint a;
+    InkPoint b;
+    Color color;
+    float width = 3.0f;
+    float rotation = 0.0f;
+    int group = 0;
+};
+
+struct InkText {
+    InkPoint at;
+    std::wstring text;
+    Color color;
+    float size = 20.0f;
+    float rotation = 0.0f;
+    int group = 0;
 };
 
 class DocView {
@@ -228,30 +258,6 @@ private:
     bool copyDone_ = false;
     UINT_PTR copyTimer_ = 0;
 
-    struct InkStroke {
-        std::vector<InkPoint> points;
-        Color color;
-        float width = 3.0f;
-        int group = 0;
-        bool highlighter = false;
-    };
-    struct InkShape {
-        int kind = 0; // 0 line, 1 arrow, 2 rectangle, 3 ellipse
-        InkPoint a;
-        InkPoint b;
-        Color color;
-        float width = 3.0f;
-        float rotation = 0.0f;
-        int group = 0;
-    };
-    struct InkText {
-        InkPoint at;
-        std::wstring text;
-        Color color;
-        float size = 20.0f;
-        float rotation = 0.0f;
-        int group = 0;
-    };
     struct TextHighlight {
         int block = 0;
         int start = 0;
@@ -290,6 +296,8 @@ private:
     bool inkDrawing_ = false;
     bool inkFreehandActive_ = false;
     bool inkErasing_ = false;
+    bool inkCurveFitted_ = false;
+    UINT_PTR inkAutoShapeTimer_ = 0;
     bool inkErasePushed_ = false;
     bool inkShapeDrawing_ = false;
     int inkColor_ = 0;
@@ -316,6 +324,7 @@ private:
     std::vector<InkPoint> inkLasso_;
     InkSnapshot inkClipboard_;
     bool inkClipboardValid_ = false;
+    int inkPasteSerial_ = 0;
     int inkDragMode_ = 0; // 1 move, 2 scale, 3 rotate
     bool inkDragMoved_ = false;
     InkPoint inkDragStart_;
@@ -456,6 +465,9 @@ private:
     void CollectTextHighlightHits(float sx, float sy, float radius, std::vector<int>& hits) const;
     void PaintPdfHighlights(class Canvas& c, int page, float x, float y, float w, float h);
     void InkClear();
+    void CancelInkAutoShape();
+    void ScheduleInkAutoShape();
+    void RecognizeInkShape();
     void FinalizeInkSegment();
     void InkScaleForZoom(float factor);
     void InkDrawStroke(class Canvas& c, const InkStroke& stroke);

@@ -6,6 +6,7 @@
 #include "document.h"
 #include "export.h"
 #include "colorpicker.h"
+#include "overlay.h"
 #include "i18n.h"
 #include "dialogs.h"
 #include "path_util.h"
@@ -95,7 +96,8 @@ enum : int {
     CMD_LANG_JA,
     CMD_LANG_KO,
     CMD_LANG_WESTERN,
-    CMD_APP_OPEN_SETTINGS = 1100
+    CMD_APP_OPEN_SETTINGS = 1100,
+    CMD_FULLSCREEN_INK
 };
 
 constexpr int kHeaderH = 58;
@@ -962,6 +964,20 @@ public:
     void Activate() {
         if (hwnd_) { ShowWindow(hwnd_, SW_RESTORE); SetForegroundWindow(hwnd_); }
     }
+    void SetTopmost(bool on) {
+        if (hwnd_)
+            SetWindowPos(hwnd_, on ? HWND_TOPMOST : HWND_NOTOPMOST, 0, 0, 0, 0,
+                         SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+    }
+    // Settings from the full-screen toolbar should land directly on the
+    // full-screen section instead of the top of the long settings page.
+    void FocusFullscreenSection() {
+        scrollY_ = 1908.0f;
+        if (hwnd_) {
+            InvalidateRect(hwnd_, nullptr, FALSE);
+            UpdateWindow(hwnd_);
+        }
+    }
     void ApplyTheme() {
         if (hwnd_) { SetDarkTitle(hwnd_, settings_->dark); InvalidateRect(hwnd_, nullptr, FALSE); }
         if (shortcutsWin_) shortcutsWin_->ApplyTheme();
@@ -1043,7 +1059,7 @@ private:
 
 void SettingsWindow::Paint() {
     if (!canvas_) canvas_ = std::make_unique<Canvas>();
-    const float aboutY = 1978.0f;
+    const float aboutY = 2340.0f;
     float footerY = aboutY + 48.0f;
     if (aboutExpanded_) footerY += 400.0f + 12.0f + 100.0f + 12.0f;
     contentHeight_ = footerY + 36.0f;
@@ -1275,9 +1291,54 @@ void SettingsWindow::Paint() {
         c.DrawText(L"5% – 60%，默认 15%；位置仅在铺满裁剪时生效", 24, 1866, w - 48, 18, 10.5f, p.muted);
     c.DrawText(L"选择后复制到配置目录并生成 ID，原图移动或删除不影响背景", 24, 1884, w - 48, 18, 10.5f, p.muted);
     c.FillRect(24, 1914, w - 48, 1, p.border);
-    AddBtn(13, 24, 1928, 120, 34, L"恢复默认");
-    AddBtn(14, 152, 1928, 132, 34, L"清空本地数据");
-    AddBtn(15, w - 118, 1928, 94, 34, L"关闭", true);
+    c.DrawText(L"全屏笔迹", 24, 1926, 220, 22, 13, p.fg, true);
+    c.DrawText(L"桌面最上层临时批注，不修改文件；返回或 Esc 退出并清理笔迹。", 24, 1950, w - 48, 18, 11, p.muted);
+    c.DrawText(L"工具栏位置", 24, 1986, 80, 24, 11.5f, p.fg, true);
+    AddBtn(90, 110, 1980, 76, 32, L"底部", !settings_->fullscreenToolbarTop);
+    AddBtn(91, 194, 1980, 76, 32, L"顶部", settings_->fullscreenToolbarTop);
+    c.DrawText(L"颜色槽", 24, 2026, 80, 20, 11.5f, p.fg, true);
+    c.DrawText(L"点击箭头切换共享调色盘中的颜色", 110, 2026, w - 140, 20, 10.5f, p.muted);
+    if (settings_->inkPresets.empty()) settings_->inkPresets = DefaultInkPresets();
+    settings_->NormalizeInkPresets();
+    for (int slot = 0; slot < 3; slot++) {
+        float y = 2048 + slot * 32.0f;
+        c.DrawText(L"槽 " + std::to_wstring(slot + 1), 24, y, 44, 26, 11.5f, p.fg, false, false,
+                   DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, false);
+        int idx = slot < (int)settings_->fullscreenInkPresets.size()
+                      ? settings_->fullscreenInkPresets[(size_t)slot] : 0;
+        idx = std::clamp(idx, 0, (int)settings_->inkPresets.size() - 1);
+        Color col = settings_->inkPresets[(size_t)idx];
+        c.FillCircle(88, y + 13, 9, col);
+        c.DrawEllipse(88, y + 13, 9, 9, p.border, 1.0f);
+        AddBtn(92 + slot * 2, 110, y, 26, 26, L"‹");
+        AddBtn(93 + slot * 2, 142, y, 26, 26, L"›");
+        c.DrawText(ColorToHex(col), 180, y, 120, 26, 10.5f, p.muted, false, true,
+                   DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, false);
+    }
+    c.DrawText(L"画笔大小", 24, 2158, 80, 24, 11.5f, p.fg, true);
+    AddBtn(98, 110, 2152, 30, 30, L"−", false,
+           settings_->fullscreenPenWidth > Settings::MinFullscreenPenWidth);
+    c.StrokeRound(146, 2152, 50, 30, 6, p.border);
+    c.DrawText(std::to_wstring(settings_->fullscreenPenWidth), 146, 2152, 50, 30, 12, p.fg, true,
+               false, DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+    AddBtn(99, 202, 2152, 30, 30, L"+", false,
+           settings_->fullscreenPenWidth < Settings::MaxFullscreenPenWidth);
+    c.DrawText(L"橡皮大小", 24, 2198, 80, 24, 11.5f, p.fg, true);
+    AddBtn(400, 110, 2192, 30, 30, L"−", false,
+           settings_->fullscreenEraserSize > Settings::MinFullscreenEraserSize);
+    c.StrokeRound(146, 2192, 50, 30, 6, p.border);
+    c.DrawText(std::to_wstring(settings_->fullscreenEraserSize), 146, 2192, 50, 30, 12, p.fg, true,
+               false, DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+    AddBtn(401, 202, 2192, 30, 30, L"+", false,
+           settings_->fullscreenEraserSize < Settings::MaxFullscreenEraserSize);
+    AddBtn(402, 24, 2236, 230, 32,
+           settings_->fullscreenTwoFingerPan ? L"双指平移：开启" : L"双指平移：关闭",
+           settings_->fullscreenTwoFingerPan);
+    c.DrawText(L"仅影响滚轮/触控板手势，不会画出笔迹", 266, 2242, w - 300, 20, 10.5f, p.muted);
+    c.FillRect(24, 2284, w - 48, 1, p.border);
+    AddBtn(13, 24, 2298, 120, 34, L"恢复默认");
+    AddBtn(14, 152, 2298, 132, 34, L"清空本地数据");
+    AddBtn(15, w - 118, 2298, 94, 34, L"关闭", true);
 
     AddBtn(80, 24, aboutY, w - 48, 34, L"许可与贡献者");
     if (aboutExpanded_) {
@@ -1548,6 +1609,51 @@ void SettingsWindow::Click(int id) {
         break;
     case 3: settings_->wheelStep = std::max(1, settings_->wheelStep - 1); break;
     case 4: settings_->wheelStep = std::min(10, settings_->wheelStep + 1); break;
+    case 90: settings_->fullscreenToolbarTop = false; break;
+    case 91: settings_->fullscreenToolbarTop = true; break;
+    case 92: case 93: case 94: case 95: case 96: case 97: {
+        int slot = (id - 92) / 2;
+        int dir = ((id - 92) % 2 == 0) ? -1 : 1;
+        if (settings_->inkPresets.empty()) settings_->inkPresets = DefaultInkPresets();
+        settings_->NormalizeInkPresets();
+        int count = (int)settings_->inkPresets.size();
+        if (slot < (int)settings_->fullscreenInkPresets.size() && count > 0) {
+            auto& slots = settings_->fullscreenInkPresets;
+            int current = slots[(size_t)slot];
+            int target = (current + dir) % count;
+            if (target < 0) target += count;
+            int other = -1;
+            for (int i = 0; i < (int)slots.size(); i++) {
+                if (i != slot && slots[(size_t)i] == target) {
+                    other = i;
+                    break;
+                }
+            }
+            if (other >= 0) std::swap(slots[(size_t)slot], slots[(size_t)other]);
+            else slots[(size_t)slot] = target;
+            settings_->NormalizeInkPresets();
+        }
+        break;
+    }
+    case 98:
+        settings_->fullscreenPenWidth = std::max(Settings::MinFullscreenPenWidth,
+                                                 settings_->fullscreenPenWidth - 1);
+        break;
+    case 99:
+        settings_->fullscreenPenWidth = std::min(Settings::MaxFullscreenPenWidth,
+                                                 settings_->fullscreenPenWidth + 1);
+        break;
+    case 400:
+        settings_->fullscreenEraserSize = std::max(Settings::MinFullscreenEraserSize,
+                                                   settings_->fullscreenEraserSize - 2);
+        break;
+    case 401:
+        settings_->fullscreenEraserSize = std::min(Settings::MaxFullscreenEraserSize,
+                                                   settings_->fullscreenEraserSize + 2);
+        break;
+    case 402:
+        settings_->fullscreenTwoFingerPan = !settings_->fullscreenTwoFingerPan;
+        break;
     case 5: {
         auto sel = SelectedExtensions(selectedExts_);
         bool ok = RegisterAssociations(ExePath(), sel);
@@ -1626,6 +1732,11 @@ void SettingsWindow::Click(int id) {
         settings_->inkToolsVisible = Settings::DefaultInkTools;
         settings_->inkPresets = DefaultInkPresets();
         settings_->inkToolbarPresets = { 0, 1, 2, 3, 4 };
+        settings_->fullscreenInkPresets = { 0, 1, 2 };
+        settings_->fullscreenToolbarTop = false;
+        settings_->fullscreenPenWidth = 3;
+        settings_->fullscreenEraserSize = 18;
+        settings_->fullscreenTwoFingerPan = true;
         settings_->documentLanguage = DocLanguage::Auto;
         settings_->canvasWidth = 2048;
         settings_->canvasHeight = 2048;
@@ -1708,6 +1819,11 @@ void SettingsWindow::Click(int id) {
         settings_->inkToolsVisible = Settings::DefaultInkTools;
         settings_->inkPresets = DefaultInkPresets();
         settings_->inkToolbarPresets = { 0, 1, 2, 3, 4 };
+        settings_->fullscreenInkPresets = { 0, 1, 2 };
+        settings_->fullscreenToolbarTop = false;
+        settings_->fullscreenPenWidth = 3;
+        settings_->fullscreenEraserSize = 18;
+        settings_->fullscreenTwoFingerPan = true;
         settings_->documentLanguage = DocLanguage::Auto;
         settings_->canvasWidth = 2048;
         settings_->canvasHeight = 2048;
@@ -2276,6 +2392,17 @@ private:
             }
             return 0;
         }
+        case WM_RBUTTONUP: {
+            float scale = GetDpiForWindow(hwnd_) / 96.0f;
+            float x = GET_X_LPARAM(lp) / scale, y = GET_Y_LPARAM(lp) / scale;
+            for (auto& b : buttons_) {
+                if (b.cmd == CMD_INK && b.enabled && b.rect.Contains(x, y)) {
+                    ShowFullscreenInkMenu();
+                    return 0;
+                }
+            }
+            break;
+        }
         case WM_MOUSEWHEEL: {
             POINT pt{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
             ScreenToClient(hwnd_, &pt);
@@ -2331,6 +2458,7 @@ private:
             DestroyWindow(hwnd_);
             return 0;
         case WM_DESTROY:
+            overlay_.reset();
             PostQuitMessage(0);
             return 0;
         }
@@ -2411,6 +2539,7 @@ private:
             if (view == ActiveView()) { UpdateOutline(); InvalidateChrome(); }
         };
         ev.openColorPicker = [this, view](int preset) { OpenColorPicker(view, preset); };
+        ev.requestFullscreenInk = [this] { ShowFullscreenInkMenu(); };
         ev.requestZoom = [this](int dir) {
             if (dir == 0) SetZoom(1.0);
             else SetZoom(settings_.zoom + (dir > 0 ? 0.1 : -0.1));
@@ -2592,6 +2721,7 @@ private:
         case CMD_THEME: ToggleTheme(); break;
         case CMD_SETTINGS:
         case CMD_APP_OPEN_SETTINGS: OpenSettings(); break;
+        case CMD_FULLSCREEN_INK: EnterFullscreenInk(); break;
         case CMD_ZOOM_IN: SetZoom(settings_.zoom + 0.1); break;
         case CMD_ZOOM_OUT: SetZoom(settings_.zoom - 0.1); break;
         case CMD_ZOOM_RESET: SetZoom(1.0); break;
@@ -2929,17 +3059,83 @@ private:
         return s;
     }
 
-    void OpenSettings() {
-        if (settingsWin_) { settingsWin_->Activate(); return; }
+    void OpenFullscreenColorPicker(int presetIndex) {
+        if (settings_.inkPresets.empty()) settings_.inkPresets = DefaultInkPresets();
+        settings_.NormalizeInkPresets();
+        if (presetIndex < 0 || presetIndex >= (int)settings_.inkPresets.size()) presetIndex = 0;
+        Color initial = settings_.inkPresets[(size_t)presetIndex];
+        HWND owner = overlay_ && overlay_->toolbarHwnd() ? overlay_->toolbarHwnd() : hwnd_;
+        auto* win = new ColorPickerWindow(owner, &settings_, presetIndex, initial,
+            [this] {
+                ForEachView([this](DocView* v) { v->SetSettings(&settings_); });
+                if (overlay_) overlay_->ApplySettings();
+                InvalidateChrome();
+            },
+            [this](int index) {
+                if (overlay_) overlay_->UsePalettePreset(index);
+                ForEachView([this](DocView* v) { v->SetSettings(&settings_); });
+                InvalidateChrome();
+            });
+        if (!win->Create()) delete win;
+    }
+
+    void ShowFullscreenInkMenu() {
+        HMENU menu = CreatePopupMenu();
+        if (!menu) return;
+        AppendMenuW(menu, MF_STRING, CMD_FULLSCREEN_INK, L"进入全屏笔迹");
+        POINT pt{};
+        GetCursorPos(&pt);
+        SetForegroundWindow(hwnd_);
+        int picked = (int)TrackPopupMenu(menu,
+            TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY, pt.x, pt.y, 0, hwnd_, nullptr);
+        DestroyMenu(menu);
+        if (picked == CMD_FULLSCREEN_INK) Command(CMD_FULLSCREEN_INK);
+    }
+
+    void EnterFullscreenInk() {
+        if (!overlay_) {
+            FullscreenInkOverlay::Callbacks cb;
+            cb.exit = [this] {
+                if (overlay_) overlay_->Hide();
+                if (hwnd_) SetForegroundWindow(hwnd_);
+                InvalidateChrome();
+            };
+            cb.settings = [this] { OpenSettings(true, true); };
+            cb.palette = [this](int preset) { OpenFullscreenColorPicker(preset); };
+            cb.paletteChanged = [this] {
+                ForEachView([this](DocView* v) { v->SetSettings(&settings_); });
+                InvalidateChrome();
+            };
+            overlay_ = std::make_unique<FullscreenInkOverlay>(hwnd_, &settings_, std::move(cb));
+        }
+        overlay_->ApplySettings();
+        if (!overlay_->Show()) {
+            MessageBoxW(hwnd_, L"无法创建全屏笔迹叠加层。", L"LitheMD",
+                        MB_OK | MB_ICONWARNING);
+        }
+    }
+
+    void OpenSettings(bool fullscreenSection = false, bool topmost = false) {
+        if (settingsWin_) {
+            if (topmost) settingsWin_->SetTopmost(true);
+            if (fullscreenSection) settingsWin_->FocusFullscreenSection();
+            settingsWin_->Activate();
+            return;
+        }
         ReloadUiLanguages();
         SetUiLanguage(settings_.uiLanguage);
         settingsWin_ = new SettingsWindow(&settings_, ActivePath(), [this] {
             ApplySettingsToViews();
+            if (overlay_) overlay_->ApplySettings();
             UpdateTitle();
             InvalidateChrome();
         }, [this] {
             settingsWin_ = nullptr;
             if (home_) home_->SetRecent(settings_.recent);
+            if (overlay_) {
+                overlay_->SetHotkeysEnabled(true);
+                if (HWND tb = overlay_->toolbarHwnd()) SetForegroundWindow(tb);
+            }
             InvalidateChrome();
         }, [this](int cmd) {
             Command(cmd);
@@ -2952,6 +3148,9 @@ private:
         if (!ok) {
             delete settingsWin_;
             settingsWin_ = nullptr;
+        } else {
+            if (topmost) settingsWin_->SetTopmost(true);
+            if (fullscreenSection) settingsWin_->FocusFullscreenSection();
         }
     }
 
@@ -3779,6 +3978,7 @@ private:
     WINDOWPLACEMENT savedPlacement_{};
     bool placementSaved_ = false;
     SettingsWindow* settingsWin_ = nullptr;
+    std::unique_ptr<FullscreenInkOverlay> overlay_;
     std::vector<HeaderBtn> buttons_;
     std::vector<TabHit> tabHits_;
     HWND tooltip_ = nullptr;

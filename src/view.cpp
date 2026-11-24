@@ -137,6 +137,7 @@ struct DocView::Layout {
 // ================================================================ DocView
 DocView::~DocView() {
     if (panTimerResolution_) { timeEndPeriod(1); panTimerResolution_ = false; }
+    if (hwnd_) KillTimer(hwnd_, 3);
     if (inkEdit_) DestroyWindow(inkEdit_);
     if (inkEditFont_) DeleteObject(inkEditFont_);
     if (inkEditBrush_) DeleteObject(inkEditBrush_);
@@ -281,6 +282,7 @@ void DocView::SetBackground(const std::wstring& path, int opacity, int fit, int 
 
 void DocView::ClearDocument() {
     if (middlePan_) EndMiddlePan();
+    CancelInkAutoShape();
     scrollMetricsValid_ = false;
     doc_.reset();
     if (canvas_) canvas_->ClearImageCache();
@@ -333,6 +335,7 @@ void DocView::ClearDocument() {
 
 void DocView::SetDocument(std::unique_ptr<Document> doc, bool preserveScroll, bool preserveInk) {
     if (middlePan_) EndMiddlePan();
+    CancelInkAutoShape();
     scrollMetricsValid_ = false;
     float oldFrac = -1;
     if (preserveScroll && layout_ && layout_->height > 1) {
@@ -451,6 +454,7 @@ void DocView::SetDocument(std::unique_ptr<Document> doc, bool preserveScroll, bo
 
 void DocView::SetError(const std::wstring& message, const std::wstring& path, const std::wstring& sourceText) {
     if (middlePan_) EndMiddlePan();
+    CancelInkAutoShape();
     scrollMetricsValid_ = false;
     doc_.reset();
     if (canvas_) canvas_->ClearImageCache();
@@ -2766,6 +2770,7 @@ void DocView::EndMiddlePan() {
 
 void DocView::OnMouseDown(int px, int py, bool ctrl) {
     SetFocus(hwnd_);
+    if (inkMode_) CancelInkAutoShape();
     float scale = GetDpiForWindow(hwnd_) / 96.0f;
     float x = px / scale, y = py / scale;
     if (middlePan_) {
@@ -2801,6 +2806,7 @@ void DocView::OnMouseDown(int px, int py, bool ctrl) {
                     InkContentToScreen(x0, y0, sx0, sy0);
                     InkContentToScreen(x1, y1, sx1, sy1);
                     float cx = (sx0 + sx1) / 2;
+                    const float movePad = 10.0f;
                     auto nearHandle = [&](float px, float py) {
                         return std::abs(x - px) <= 8 && std::abs(y - py) <= 8;
                     };
@@ -2813,7 +2819,8 @@ void DocView::OnMouseDown(int px, int py, bool ctrl) {
                         InkSelectBeginDrag(x, y, 2);
                         return;
                     }
-                    if (x >= sx0 && x <= sx1 && y >= sy0 && y <= sy1) {
+                    if (x >= sx0 - movePad && x <= sx1 + movePad &&
+                        y >= sy0 - movePad && y <= sy1 + movePad) {
                         InkSelectBeginDrag(x, y, 1);
                         return;
                     }
@@ -3135,7 +3142,9 @@ void DocView::OnMouseMove(int px, int py) {
         }
         if (inkDragMode_) {
             InkSelectMoveDrag(x, y);
-            SetCursor(LoadCursorW(nullptr, IDC_SIZEALL));
+            if (inkDragMode_ == 3) SetCursor(LoadCursorW(nullptr, IDC_HAND));
+            else if (inkDragMode_ == 2) SetCursor(LoadCursorW(nullptr, IDC_SIZENWSE));
+            else SetCursor(LoadCursorW(nullptr, IDC_SIZEALL));
             return;
         }
         if (pdfHighlighting_) {
@@ -3164,8 +3173,37 @@ void DocView::OnMouseMove(int px, int py) {
             inkHover_ = action;
             InvalidateAll();
         }
-        if (action) SetCursor(LoadCursorW(nullptr, IDC_HAND));
-        else SetCursor(LoadCursorW(nullptr, overBar ? IDC_ARROW : IDC_CROSS));
+        if (action) {
+            SetCursor(LoadCursorW(nullptr, IDC_HAND));
+        } else if (overBar) {
+            SetCursor(LoadCursorW(nullptr, IDC_ARROW));
+        } else if (inkTool_ == INK_TOOL_SELECT) {
+            HCURSOR cur = LoadCursorW(nullptr, IDC_ARROW);
+            if (!inkSelection_.empty()) {
+                float x0, y0, x1, y1;
+                InkSelectionBounds(x0, y0, x1, y1);
+                float sx0, sy0, sx1, sy1;
+                InkContentToScreen(x0, y0, sx0, sy0);
+                InkContentToScreen(x1, y1, sx1, sy1);
+                float cx = (sx0 + sx1) / 2;
+                if (std::abs(x - cx) <= 8 && std::abs(y - (sy0 - 22)) <= 8) {
+                    cur = LoadCursorW(nullptr, IDC_HAND);
+                } else if ((std::abs(x - sx0) <= 8 && std::abs(y - sy0) <= 8) ||
+                           (std::abs(x - sx1) <= 8 && std::abs(y - sy1) <= 8)) {
+                    cur = LoadCursorW(nullptr, IDC_SIZENWSE);
+                } else if ((std::abs(x - sx1) <= 8 && std::abs(y - sy0) <= 8) ||
+                           (std::abs(x - sx0) <= 8 && std::abs(y - sy1) <= 8)) {
+                    cur = LoadCursorW(nullptr, IDC_SIZENESW);
+                } else if (x >= sx0 - 10 && x <= sx1 + 10 && y >= sy0 - 10 && y <= sy1 + 10) {
+                    cur = LoadCursorW(nullptr, IDC_SIZEALL);
+                }
+            }
+            SetCursor(cur);
+        } else if (inkTool_ == INK_TOOL_TEXT) {
+            SetCursor(LoadCursorW(nullptr, IDC_IBEAM));
+        } else {
+            SetCursor(LoadCursorW(nullptr, IDC_CROSS));
+        }
         return;
     }
     UpdateCopyHover(x, y);
@@ -3316,6 +3354,28 @@ void DocView::OnMouseWheel(int delta, bool ctrl, bool shift, float x, float y) {
         if (events_.requestZoom) events_.requestZoom(delta > 0 ? 1 : -1);
         return;
     }
+    bool touchpad = (GetMessageExtraInfo() & 0xFFFFFF00) == 0xFF515700;
+    if (!touchpad && inkMode_ && inkTool_ == INK_TOOL_SELECT && !inkSelection_.empty()) {
+        float notches = (float)delta / (float)WHEEL_DELTA;
+        float scale = Clampf(1.0f + notches * 0.02f * (float)wheelStep_, 0.5f, 2.0f);
+        InkNormalizeSelection();
+        float x0, y0, x1, y1;
+        InkSelectionBounds(x0, y0, x1, y1);
+        if (x1 > x0 && y1 > y0) {
+            float scx = 0, scy = 0;
+            InkContentToScreen((x0 + x1) / 2, (y0 + y1) / 2, scx, scy);
+            InkPushUndo();
+            auto& layer = Ink();
+            inkDragBase_.strokes = layer.strokes;
+            inkDragBase_.shapes = layer.shapes;
+            inkDragBase_.texts = layer.texts;
+            inkDragPivot_ = { scx, scy };
+            InkApplySelectionTransform(2, 0, 0, scale, 0.0f);
+            MarkNotesDirty();
+            InvalidateAll();
+        }
+        return;
+    }
     if (!doc_ && errorMessage_.empty()) {
         float wy = y + scrollY_;
         if (welcomeRecentCard_.Contains(x, wy)) {
@@ -3356,7 +3416,7 @@ void DocView::OnKeyDown(WPARAM key) {
         }
         return;
     }
-    if (inkMode_ && key == VK_DELETE && !inkSelection_.empty()) {
+    if (inkMode_ && (key == VK_DELETE || key == VK_BACK) && !inkSelection_.empty()) {
         DeleteInkSelection();
         return;
     }
@@ -3583,6 +3643,10 @@ LRESULT DocView::Handle(UINT msg, WPARAM wp, LPARAM lp) {
             copyPressed_ = false;
             copyTimer_ = 0;
             InvalidateAll();
+        } else if (wp == 3 && inkAutoShapeTimer_) {
+            KillTimer(hwnd_, 3);
+            inkAutoShapeTimer_ = 0;
+            RecognizeInkShape();
         }
         return 0;
     case WM_CAPTURECHANGED:
@@ -3665,6 +3729,10 @@ LRESULT DocView::Handle(UINT msg, WPARAM wp, LPARAM lp) {
                     if (settings_ && offset < (int)settings_->inkToolbarPresets.size())
                         preset = settings_->inkToolbarPresets[(size_t)offset];
                     if (events_.openColorPicker) events_.openColorPicker(preset);
+                    return 0;
+                }
+                if (events_.requestFullscreenInk) {
+                    events_.requestFullscreenInk();
                     return 0;
                 }
             }
