@@ -1,7 +1,0 @@
-姓名,城市,技能,备注
-张三,北京,Python,"熟悉 pandas、NumPy"
-李四,上海,前端,"React, Vue"
-王五,深圳,后端,"Go, Rust"
-赵六,杭州,数据科学,"SQL, 可视化"
-Alice,New York,Machine Learning,"PyTorch, CUDA"
-Bob,London,DevOps,"Docker, K8s"

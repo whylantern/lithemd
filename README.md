@@ -4,7 +4,7 @@ GitHub：<https://github.com/whylantern/lithemd>
 
 轻量、离线、单文件的 Windows 本地文档阅读器。使用 **C++20 + Win32 + Direct2D/DirectWrite** 编写，不依赖 .NET Framework、Java、Electron 或浏览器运行时。
 
-编译产物 `dist\lithemd.exe` 约 9 MB（内嵌 PDFium），在 Windows 10 1903+ / Windows 11 上直接双击即可运行。
+编译产物 `dist\lithemd.exe` 约 10 MB（内嵌 PDFium），在 Windows 10 1903+ / Windows 11 上直接双击即可运行。
 
 ## 界面与背景
 
@@ -64,16 +64,18 @@ PDF、Office 和图片等已支持的二进制文档不受影响。
 ## 快速开始
 
 > 仓库不再提交编译产物 `dist\lithemd.exe`。可用版本请到 [Releases](https://github.com/whylantern/lithemd/releases) 下载，自行构建见下文“编译”。
+>
+> 仓库也不附带 `samples/` 示例文件；本地示例目录已被 `.gitignore` 忽略，请使用自己的文档测试。
 
 ```powershell
 # 打开阅读器
 .\dist\lithemd.exe
 
-# 打开指定文件
-.\dist\lithemd.exe samples\demo.md
-.\dist\lithemd.exe samples\sample.docx
-.\dist\lithemd.exe samples\sample.xlsx
-.\dist\lithemd.exe samples\sample.pdf
+# 打开指定文件（替换为你的文件路径）
+.\dist\lithemd.exe 你的文档.md
+.\dist\lithemd.exe 你的文档.docx
+.\dist\lithemd.exe 你的表格.xlsx
+.\dist\lithemd.exe 你的文档.pdf
 
 # 直接打开设置
 .\dist\lithemd.exe --settings
@@ -235,9 +237,8 @@ lithemd/
 ├─ build.ps1 / build.bat      构建脚本 / 双击包装器
 ├─ app.manifest               DPI / 系统兼容性清单
 ├─ README.md / LICENSE        说明与许可证
-├─ docs/                      全局要求、架构、编辑可行性、版本记录
+├─ docs/                      需求、架构、格式、背景图、2.6 规划与版本记录
 ├─ assets/lithemd.ico          程序图标
-├─ samples/                   各格式示例
 ├─ src/                       C++ 源码
 │  ├─ main.cpp                入口
 │  ├─ app.cpp                 主窗口、工具栏、设置窗口、文件关联
@@ -271,16 +272,15 @@ lithemd/
 - 超大 Markdown / Notebook / 对话记录会自动进入源码模式，避免界面卡顿。
 - `.doc` / `.xls` 是兼容读取模式，不保证与 Word / Excel 的排版一致。
 - PDF 受密码保护时会提示；当前版本不支持输入密码。
-- 文件编辑功能尚未实现，相关技术评估见 [docs/EDITING.md](docs/EDITING.md)。
+- 文件编辑功能尚未实现，后续规划见 [docs/EDITING-2.6-PLAN.md](docs/EDITING-2.6-PLAN.md)。
 
 ## 第三方组件
 
 - [PDFium](https://pdfium.googlesource.com/pdfium/)：BSD 3-Clause，用于 PDF 渲染。
 - [miniz](https://github.com/richgel999/miniz)：MIT / public domain，用于 OOXML ZIP。
-- 示例文件中的 Apache POI 测试文档与工作簿遵循 Apache License 2.0；`samples/02_python.ipynb` 等仅用于展示。
 
 ## 许可证
 
 LitheMD 的原始源代码采用 **MIT License**，见 [LICENSE](LICENSE)。
 
-第三方组件、示例文件和内置编译器仍遵循各自的许可证，详见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。MIT 许可证不改变这些第三方条款。
+第三方组件和内置编译器仍遵循各自的许可证，详见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。MIT 许可证不改变这些第三方条款。
