@@ -279,6 +279,11 @@ lithemd/
 - [PDFium](https://pdfium.googlesource.com/pdfium/)：BSD 3-Clause，用于 PDF 渲染。
 - [miniz](https://github.com/richgel999/miniz)：MIT / public domain，用于 OOXML ZIP。
 
+## 贡献者
+
+- Bright_lantern（GitHub [@whylantern](https://github.com/whylantern)）
+- Shenyun-Z（GitHub [@Shenyun-Z](https://github.com/Shenyun-Z)）
+
 ## 许可证
 
 LitheMD 的原始源代码采用 **MIT License**，见 [LICENSE](LICENSE)。

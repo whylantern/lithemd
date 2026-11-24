@@ -1375,7 +1375,7 @@ SOFTWARE.)LIC";
         c.FillRound(cardX, contributorY, cardW, 100, 10, p.surface);
         c.StrokeRound(cardX, contributorY, cardW, 100, 10, p.border);
         c.DrawText(L"Contributor", cardX + 16, contributorY + 14, 220, 22, 13, p.fg, true);
-        c.DrawText(L"Bright_lantern", cardX + 16, contributorY + 42, 260, 22, 13,
+        c.DrawText(L"Bright_lantern · Shenyun-Z", cardX + 16, contributorY + 42, 260, 22, 13,
                    p.fg, true, false);
         contributorLinkRect_ = { cardX + 16, contributorY + 66, 280, 22 };
         c.DrawText(L"GitHub  @whylantern", contributorLinkRect_.x, contributorLinkRect_.y,
