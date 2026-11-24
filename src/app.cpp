@@ -1055,13 +1055,14 @@ private:
     std::wstring opacityError_;
     bool aboutExpanded_ = false;
     DRect contributorLinkRect_;
+    DRect contributorLinkRect2_;
 };
 
 void SettingsWindow::Paint() {
     if (!canvas_) canvas_ = std::make_unique<Canvas>();
     const float aboutY = 2340.0f;
     float footerY = aboutY + 48.0f;
-    if (aboutExpanded_) footerY += 400.0f + 12.0f + 100.0f + 12.0f;
+    if (aboutExpanded_) footerY += 400.0f + 12.0f + 146.0f + 12.0f;
     contentHeight_ = footerY + 36.0f;
     UINT dpi = GetDpiForWindow(hwnd_);
     if (!dpi) dpi = 96;
@@ -1372,18 +1373,26 @@ SOFTWARE.)LIC";
                    p.muted, false, false, DWRITE_TEXT_ALIGNMENT_LEADING,
                    DWRITE_PARAGRAPH_ALIGNMENT_NEAR, true);
         float contributorY = licenseY + 412.0f;
-        c.FillRound(cardX, contributorY, cardW, 100, 10, p.surface);
-        c.StrokeRound(cardX, contributorY, cardW, 100, 10, p.border);
+        c.FillRound(cardX, contributorY, cardW, 146, 10, p.surface);
+        c.StrokeRound(cardX, contributorY, cardW, 146, 10, p.border);
         c.DrawText(L"Contributor", cardX + 16, contributorY + 14, 220, 22, 13, p.fg, true);
-        c.DrawText(L"Bright_lantern · Shenyun-Z", cardX + 16, contributorY + 42, 260, 22, 13,
+        c.DrawText(L"Bright_lantern", cardX + 16, contributorY + 42, 260, 22, 13,
                    p.fg, true, false);
-        contributorLinkRect_ = { cardX + 16, contributorY + 66, 280, 22 };
+        contributorLinkRect_ = { cardX + 16, contributorY + 64, 280, 22 };
         c.DrawText(L"GitHub  @whylantern", contributorLinkRect_.x, contributorLinkRect_.y,
                    contributorLinkRect_.w, contributorLinkRect_.h, 11.5f, p.accent,
                    false, false, DWRITE_TEXT_ALIGNMENT_LEADING,
                    DWRITE_PARAGRAPH_ALIGNMENT_CENTER, false);
+        c.DrawText(L"Shenyun-Z", cardX + 16, contributorY + 90, 260, 22, 13,
+                   p.fg, true, false);
+        contributorLinkRect2_ = { cardX + 16, contributorY + 112, 280, 22 };
+        c.DrawText(L"GitHub  @Shenyun-Z", contributorLinkRect2_.x, contributorLinkRect2_.y,
+                   contributorLinkRect2_.w, contributorLinkRect2_.h, 11.5f, p.accent,
+                   false, false, DWRITE_TEXT_ALIGNMENT_LEADING,
+                   DWRITE_PARAGRAPH_ALIGNMENT_CENTER, false);
     } else {
         contributorLinkRect_ = DRect{};
+        contributorLinkRect2_ = DRect{};
     }
     std::wstring footer = std::wstring(L"LitheMD ") + kAppVersion +
                           L"  ·  MIT License  ·  © 2026 LitheMD";
@@ -1481,6 +1490,7 @@ void SettingsWindow::Click(int id) {
     if (id == 80) {
         aboutExpanded_ = !aboutExpanded_;
         contributorLinkRect_ = DRect{};
+        contributorLinkRect2_ = DRect{};
         if (hwnd_) {
             InvalidateRect(hwnd_, nullptr, FALSE);
             UpdateWindow(hwnd_);
@@ -1919,7 +1929,8 @@ LRESULT SettingsWindow::Handle(UINT msg, WPARAM wp, LPARAM lp) {
         bool overCheck = false;
         for (auto& ch : checks_) if (ch.rect.Contains(x, y)) { overCheck = true; break; }
         for (auto& ch : toolChecks_) if (ch.rect.Contains(x, y)) { overCheck = true; break; }
-        bool overLink = aboutExpanded_ && contributorLinkRect_.Contains(x, y);
+        bool overLink = aboutExpanded_ &&
+                        (contributorLinkRect_.Contains(x, y) || contributorLinkRect2_.Contains(x, y));
         if (hover != hover_) { hover_ = hover; InvalidateRect(hwnd_, nullptr, FALSE); }
         SetCursor(LoadCursorW(nullptr, (hover || overCheck || overLink) ? IDC_HAND : IDC_ARROW));
         TRACKMOUSEEVENT tme{ sizeof(tme), TME_LEAVE, hwnd_, 0 };
@@ -1937,6 +1948,11 @@ LRESULT SettingsWindow::Handle(UINT msg, WPARAM wp, LPARAM lp) {
             CommitOpacityEdit(false);
         if (aboutExpanded_ && contributorLinkRect_.Contains(x, y)) {
             ShellExecuteW(nullptr, L"open", L"https://github.com/whylantern", nullptr, nullptr,
+                          SW_SHOWNORMAL);
+            return 0;
+        }
+        if (aboutExpanded_ && contributorLinkRect2_.Contains(x, y)) {
+            ShellExecuteW(nullptr, L"open", L"https://github.com/Shenyun-Z", nullptr, nullptr,
                           SW_SHOWNORMAL);
             return 0;
         }
