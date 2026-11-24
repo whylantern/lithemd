@@ -63,6 +63,8 @@ PDF、Office 和图片等已支持的二进制文档不受影响。
 
 ## 快速开始
 
+> 仓库不再提交编译产物 `dist\lithemd.exe`。可用版本请到 [Releases](https://github.com/whylantern/lithemd/releases) 下载，自行构建见下文“编译”。
+
 ```powershell
 # 打开阅读器
 .\dist\lithemd.exe
@@ -258,7 +260,7 @@ lithemd/
 ├─ vendor/
 │  ├─ miniz.c / miniz.h       ZIP/DEFLATE（公共领域）
 │  └─ pdfium/                 PDFium DLL、头文件、许可证
-└─ dist/lithemd.exe            编译产物
+└─ dist/lithemd.exe            编译产物（不纳入版本库）
 ```
 
 ## 说明与边界

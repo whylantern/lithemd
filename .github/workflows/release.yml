@@ -1,0 +1,50 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  build-and-attach:
+    name: Build and attach binary
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build with bundled w64devkit
+        shell: pwsh
+        run: ./build.ps1
+
+      - name: Collect version and checksum
+        id: info
+        shell: pwsh
+        run: |
+          $exe = 'dist/lithemd.exe'
+          if (-not (Test-Path $exe)) { throw 'build produced no dist/lithemd.exe' }
+          $ver = (Get-Item $exe).VersionInfo.FileVersion
+          $hash = (Get-FileHash $exe -Algorithm SHA256).Hash.ToLower()
+          "$hash  lithemd.exe" | Set-Content -Path 'SHA256SUMS' -Encoding ascii
+          "version=$ver" >> $env:GITHUB_OUTPUT
+          Write-Host "built LitheMD $ver  sha256=$hash"
+
+      - name: Attach to GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = '${{ github.ref_name }}'
+          $ver = '${{ steps.info.outputs.version }}'
+          gh release view $tag --json tagName > $null 2>&1
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $tag --draft --title "LitheMD $ver" --notes "发布说明待补充；构建产物由 CI 自动上传。"
+          }
+          gh release upload $tag dist/lithemd.exe SHA256SUMS --clobber
